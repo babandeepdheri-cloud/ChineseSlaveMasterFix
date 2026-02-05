@@ -89,9 +89,10 @@ xdata unsigned int modbus_error_count = 0;
 data unsigned char consecutive_poll_failures = 0;
 bit slave_disconnected = 0;
 bit data_received_flag = 0;
-xdata volatile unsigned long dp_flash_timer = 0;
+xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
 #define MAX_CONSECUTIVE_FAILURES 5
+#define DASH_CHAR 10
 
 static unsigned char scan_d = 0;
 
@@ -125,18 +126,18 @@ void Timer0_ISR(void) interrupt 1
     switch (scan_d)
     {
       // --- LET (Total Flow) - show dashes ---
-      case 0: display_digit(10); fnd13=1; break;
-      case 1: display_digit(10); fnd12=1; break;
-      case 2: display_digit(10); fnd11=1; break;
-      case 3: display_digit(10); fnd10=1; break;
-      case 4: display_digit(10); fnd4=1; break;
+      case 0: display_digit(DASH_CHAR); fnd13=1; break;
+      case 1: display_digit(DASH_CHAR); fnd12=1; break;
+      case 2: display_digit(DASH_CHAR); fnd11=1; break;
+      case 3: display_digit(DASH_CHAR); fnd10=1; break;
+      case 4: display_digit(DASH_CHAR); fnd4=1; break;
 
       // --- KET (Flow Rate) - show dashes ---
-      case 5: display_digit(10); fnd9=1; break;
-      case 6: display_digit(10); fnd8=1; break;
-      case 7: display_digit(10); fnd7=1; break;
-      case 8: display_digit(10); fnd6=1; break;
-      case 9: display_digit(10); fnd5=1; break;
+      case 5: display_digit(DASH_CHAR); fnd9=1; break;
+      case 6: display_digit(DASH_CHAR); fnd8=1; break;
+      case 7: display_digit(DASH_CHAR); fnd7=1; break;
+      case 8: display_digit(DASH_CHAR); fnd6=1; break;
+      case 9: display_digit(DASH_CHAR); fnd5=1; break;
 
       // --- PET (ID) - still show ID ---
       case 10: display_digit(disp_id_digits[0]); fnd3=1; break;
@@ -208,7 +209,7 @@ void Timer0_ISR(void) interrupt 1
     
     // 3. Handle DP flashing when data is received
     // Flash H_Segment (DP) for DP_FLASH_DURATION_MS after data received
-    if (data_received_flag && ((ms_ticks - dp_flash_timer) < DP_FLASH_DURATION_MS)) {
+    if (data_received_flag && ((ms_ticks - dp_flash_start_ms) < DP_FLASH_DURATION_MS)) {
       H_Segment=0;  // Turn on DP (decimal point)
     }
   }
@@ -369,7 +370,7 @@ static bit modbus_parse_response(void)
   
   // Set data received flag and start DP flash timer
   data_received_flag = 1;
-  dp_flash_timer = ms_ticks;
+  dp_flash_start_ms = ms_ticks;
   
   return 1;
 }
@@ -543,7 +544,7 @@ void display_digit(unsigned char c)
     case 7: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=1; E_Segment=1; F_Segment=1; G_Segment=1; break;
     case 8: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=0; E_Segment=0; F_Segment=0; G_Segment=0; break;
     case 9: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=0; E_Segment=1; F_Segment=0; G_Segment=0; break;
-    case 10: // Dash character '-' (only G segment on)
+    case DASH_CHAR: // Dash character '-' (only G segment on)
       A_Segment=1; B_Segment=1; C_Segment=1; D_Segment=1; E_Segment=1; F_Segment=1; G_Segment=0; break;
     default: A_Segment=B_Segment=C_Segment=D_Segment=E_Segment=F_Segment=G_Segment=H_Segment=1; break;
   }
