@@ -332,7 +332,7 @@ void modbus_send_request(unsigned char slave_id, unsigned int start_addr, unsign
   RS485_DE = 1;
   ms_delay(1);
   for (i = 0; i < len; i++) uart0_send_byte(modbus_tx_buf[i]);
-  ms_delay(2);
+  ms_delay(3);  // Increased from 2ms to 3ms to ensure last byte fully transmitted
   RS485_DE = 0;
   
   waiting_for_response = 1;
