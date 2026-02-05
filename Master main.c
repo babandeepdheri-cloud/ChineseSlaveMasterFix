@@ -85,6 +85,14 @@ xdata volatile unsigned long request_sent_ms = 0;
 data unsigned char modbus_retry_count = 0;
 xdata unsigned int modbus_error_count = 0; 
 
+/* Connection status and DP flash control */
+data unsigned char consecutive_poll_failures = 0;
+bit slave_disconnected = 0;
+bit data_received_flag = 0;
+xdata volatile unsigned long dp_flash_timer = 0;
+#define DP_FLASH_DURATION_MS 500
+#define MAX_CONSECUTIVE_FAILURES 5
+
 static unsigned char scan_d = 0;
 
 /* =========================
@@ -112,65 +120,97 @@ void Timer0_ISR(void) interrupt 1
   fnd1=fnd2=fnd3=fnd4=fnd5=fnd6=fnd7=fnd8=fnd9=fnd10=fnd11=fnd12=fnd13=0;
   A_Segment=B_Segment=C_Segment=D_Segment=E_Segment=F_Segment=G_Segment=H_Segment=1;
 
-  switch (scan_d)
-  {
-    // --- LET (Total Flow) ---
-    case 0: // 10,000s place (fnd13 / P3.0)
-      display_digit(disp_total_digits[0]); 
-      fnd13=1; 
-      break;
-    case 1: 
-      display_digit(disp_total_digits[1]); 
-      fnd12=1; 
-      break;
-    case 2: 
-      display_digit(disp_total_digits[2]); 
-      fnd11=1; 
-      break;
-    case 3: 
-      display_digit(disp_total_digits[3]); 
-      fnd10=1; 
-      break;
-    case 4: 
-      display_digit(disp_total_digits[4]); 
-      fnd4=1; 
-      break;
+  // 2. Check if slave is disconnected - display dashes
+  if (slave_disconnected) {
+    switch (scan_d)
+    {
+      // --- LET (Total Flow) - show dashes ---
+      case 0: display_digit(10); fnd13=1; break;
+      case 1: display_digit(10); fnd12=1; break;
+      case 2: display_digit(10); fnd11=1; break;
+      case 3: display_digit(10); fnd10=1; break;
+      case 4: display_digit(10); fnd4=1; break;
 
-    // --- KET (Flow Rate) ---
-    case 5: 
-      display_digit(disp_fr_digits[0]); 
-      fnd9=1; 
-      break;
-    case 6: 
-      display_digit(disp_fr_digits[1]); 
-      fnd8=1; 
-      break;
-    case 7: 
-      display_digit(disp_fr_digits[2]); 
-      fnd7=1; 
-      break;
-    case 8: 
-      display_digit(disp_fr_digits[3]); 
-      fnd6=1; 
-      break;
-    case 9: 
-      display_digit(disp_fr_digits[4]); 
-      fnd5=1; 
-      break;
+      // --- KET (Flow Rate) - show dashes ---
+      case 5: display_digit(10); fnd9=1; break;
+      case 6: display_digit(10); fnd8=1; break;
+      case 7: display_digit(10); fnd7=1; break;
+      case 8: display_digit(10); fnd6=1; break;
+      case 9: display_digit(10); fnd5=1; break;
 
-    // --- PET (ID) ---
-    case 10: 
-      display_digit(disp_id_digits[0]); 
-      fnd3=1; 
-      break;
-    case 11: 
-      display_digit(disp_id_digits[1]); 
-      fnd2=1; 
-      break;
-    case 12: 
-      display_digit(disp_id_digits[2]); 
-      fnd1=1; 
-      break;
+      // --- PET (ID) - still show ID ---
+      case 10: display_digit(disp_id_digits[0]); fnd3=1; break;
+      case 11: display_digit(disp_id_digits[1]); fnd2=1; break;
+      case 12: display_digit(disp_id_digits[2]); fnd1=1; break;
+    }
+  } else {
+    // Normal display mode
+    switch (scan_d)
+    {
+      // --- LET (Total Flow) ---
+      case 0: // 10,000s place (fnd13 / P3.0)
+        display_digit(disp_total_digits[0]); 
+        fnd13=1; 
+        break;
+      case 1: 
+        display_digit(disp_total_digits[1]); 
+        fnd12=1; 
+        break;
+      case 2: 
+        display_digit(disp_total_digits[2]); 
+        fnd11=1; 
+        break;
+      case 3: 
+        display_digit(disp_total_digits[3]); 
+        fnd10=1; 
+        break;
+      case 4: 
+        display_digit(disp_total_digits[4]); 
+        fnd4=1; 
+        break;
+
+      // --- KET (Flow Rate) ---
+      case 5: 
+        display_digit(disp_fr_digits[0]); 
+        fnd9=1; 
+        break;
+      case 6: 
+        display_digit(disp_fr_digits[1]); 
+        fnd8=1; 
+        break;
+      case 7: 
+        display_digit(disp_fr_digits[2]); 
+        fnd7=1; 
+        break;
+      case 8: 
+        display_digit(disp_fr_digits[3]); 
+        fnd6=1; 
+        break;
+      case 9: 
+        display_digit(disp_fr_digits[4]); 
+        fnd5=1; 
+        break;
+
+      // --- PET (ID) ---
+      case 10: 
+        display_digit(disp_id_digits[0]); 
+        fnd3=1; 
+        break;
+      case 11: 
+        display_digit(disp_id_digits[1]); 
+        fnd2=1; 
+        break;
+      case 12: 
+        display_digit(disp_id_digits[2]); 
+        fnd1=1; 
+        break;
+    }
+    
+    // 3. Handle DP flashing when data is received
+    // Flash H_Segment (DP) for DP_FLASH_DURATION_MS after data received
+    if (data_received_flag && ((ms_ticks - dp_flash_timer) < DP_FLASH_DURATION_MS)) {
+      H_Segment=0;  // Turn on DP (decimal point)
+    }
   }
 
   if (++scan_d == TOTAL_DIGITS) scan_d = 0;
@@ -327,6 +367,10 @@ static bit modbus_parse_response(void)
   // Update pre-calculated digit arrays for ISR
   update_display_digits();
   
+  // Set data received flag and start DP flash timer
+  data_received_flag = 1;
+  dp_flash_timer = ms_ticks;
+  
   return 1;
 }
 
@@ -371,9 +415,11 @@ void modbus_rx_task(void)
   if (!modbus_frame_ready) return;
   
   if (modbus_parse_response()) {
-    // Success! Reset retry counter
+    // Success! Reset retry counter and consecutive failures
     waiting_for_response = 0;
     modbus_retry_count = 0;
+    consecutive_poll_failures = 0;
+    slave_disconnected = 0;  // Mark as connected
   } else {
     // Parse failed - will retry via timeout mechanism
     modbus_error_count++;
@@ -438,9 +484,17 @@ void main(void)
           modbus_retry_count++;
           modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
         } else {
-          // Max retries reached, give up and wait for next poll cycle
+          // Max retries reached for this poll cycle
           waiting_for_response = 0;
           modbus_retry_count = 0;
+          
+          // Increment consecutive poll failures
+          consecutive_poll_failures++;
+          
+          // Check if slave is disconnected (5 consecutive poll failures)
+          if (consecutive_poll_failures >= MAX_CONSECUTIVE_FAILURES) {
+            slave_disconnected = 1;
+          }
         }
       }
     }
@@ -489,6 +543,8 @@ void display_digit(unsigned char c)
     case 7: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=1; E_Segment=1; F_Segment=1; G_Segment=1; break;
     case 8: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=0; E_Segment=0; F_Segment=0; G_Segment=0; break;
     case 9: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=0; E_Segment=1; F_Segment=0; G_Segment=0; break;
+    case 10: // Dash character '-' (only G segment on)
+      A_Segment=1; B_Segment=1; C_Segment=1; D_Segment=1; E_Segment=1; F_Segment=1; G_Segment=0; break;
     default: A_Segment=B_Segment=C_Segment=D_Segment=E_Segment=F_Segment=G_Segment=H_Segment=1; break;
   }
 }
