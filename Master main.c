@@ -84,6 +84,7 @@ xdata volatile unsigned long request_sent_ms = 0;
 /* Retry and error tracking */
 data unsigned char modbus_retry_count = 0;
 xdata unsigned int modbus_error_count = 0; 
+xdata volatile unsigned long last_request_sent_ms = 0;  // Track last request time globally 
 
 /* Connection status and DP flash control */
 data unsigned char consecutive_poll_failures = 0;
@@ -93,6 +94,7 @@ xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
 #define MAX_CONSECUTIVE_FAILURES 10  // Increased from 5 to 10 for more tolerance
 #define DASH_CHAR 10
+#define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
 
@@ -337,6 +339,7 @@ void modbus_send_request(unsigned char slave_id, unsigned int start_addr, unsign
   
   waiting_for_response = 1;
   request_sent_ms = ms_ticks;
+  last_request_sent_ms = ms_ticks;  // Track globally for Chinese slave timing requirement
 }
 
 static bit modbus_parse_response(void)
@@ -485,9 +488,13 @@ void main(void)
         modbus_error_count++;
         
         if (modbus_retry_count < MODBUS_MAX_RETRIES) {
-          // Retry the request
-          modbus_retry_count++;
-          modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
+          // Check if enough time has passed since last request (Chinese slave requirement)
+          if ((ms_ticks - last_request_sent_ms) >= MIN_REQUEST_INTERVAL_MS) {
+            // Retry the request
+            modbus_retry_count++;
+            modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
+          }
+          // else: wait for next loop iteration to retry
         } else {
           // Max retries reached for this poll cycle
           waiting_for_response = 0;
@@ -496,7 +503,7 @@ void main(void)
           // Increment consecutive poll failures
           consecutive_poll_failures++;
           
-          // Check if slave is disconnected (5 consecutive poll failures)
+          // Check if slave is disconnected (10 consecutive poll failures)
           if (consecutive_poll_failures >= MAX_CONSECUTIVE_FAILURES) {
             slave_disconnected = 1;
           }
@@ -506,9 +513,13 @@ void main(void)
 
     if (!waiting_for_response) {
       if ((ms_ticks - last_poll_ms) >= POLL_INTERVAL_MS) {
-        last_poll_ms = ms_ticks;
-        modbus_retry_count = 0;  // Reset retry counter for new request
-        modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
+        // Also check Chinese slave timing requirement
+        if ((ms_ticks - last_request_sent_ms) >= MIN_REQUEST_INTERVAL_MS) {
+          last_poll_ms = ms_ticks;
+          modbus_retry_count = 0;  // Reset retry counter for new request
+          modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
+        }
+        // else: wait for next loop iteration
       }
     }
 
