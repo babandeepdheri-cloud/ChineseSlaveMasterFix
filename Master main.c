@@ -91,7 +91,7 @@ bit slave_disconnected = 0;
 bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 5
+#define MAX_CONSECUTIVE_FAILURES 10  // Increased from 5 to 10 for more tolerance
 #define DASH_CHAR 10
 
 static unsigned char scan_d = 0;
@@ -345,9 +345,13 @@ static bit modbus_parse_response(void)
   unsigned int high_word, low_word;
   unsigned long total_val, fr_val;
   
-  if (modbus_rx_len < 33) return 0;
+  // Expected response: 1(ID) + 1(FC) + 1(count) + 28(data) + 2(CRC) = 33 bytes
+  if (modbus_rx_len != 33) return 0;
   
   if (modbus_rx_buf[0] != CHINESE_SLAVE_ID || modbus_rx_buf[1] != 0x03) return 0;
+  
+  // Check byte count field (should be 28 for 14 registers)
+  if (modbus_rx_buf[2] != 28) return 0;
   
   crc_recv = ((unsigned int)modbus_rx_buf[32] << 8) | modbus_rx_buf[31];
   crc_calc = modbus_crc16(modbus_rx_buf, 31);
