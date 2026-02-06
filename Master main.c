@@ -49,7 +49,7 @@ sbit signal = P1^7;
 #define MIN_SLAVE_ID        1
 #define MAX_SLAVE_ID        5
 #define POLL_INTERVAL_MS    1000UL
-#define DISCOVERY_INTERVAL_MS  5000UL  // Scan for new slaves every 5 seconds (faster discovery)
+#define DISCOVERY_INTERVAL_MS  2000UL  // Scan for new slaves every 2 seconds for quick reconnection
 #define DISPLAY_TOGGLE_INTERVAL_MS  5000UL  // Toggle display every 5 seconds
 
 /* =========================
@@ -131,7 +131,7 @@ volatile bit slave_disconnected = 0;  // At least one slave showing disconnect o
 volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 5  // Changed back to 5 per requirements
+#define MAX_CONSECUTIVE_FAILURES 3  // Show "----" after 3-4 consecutive failures as per user requirement
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -653,7 +653,7 @@ void handle_discovery(void)
   if (scanning_mode) {
     discovery_interval = 1000UL;  // 1 second during scanning mode for faster initial discovery
   } else {
-    discovery_interval = DISCOVERY_INTERVAL_MS;  // 5 seconds after scanning mode
+    discovery_interval = DISCOVERY_INTERVAL_MS;  // 2 seconds for continuous background discovery
   }
   
   if ((ms_ticks - last_discovery_ms) < discovery_interval) {
