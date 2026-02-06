@@ -85,12 +85,30 @@ data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Ini
 #define CHAR_i 18  // Letter i
 #define CHAR_SPACE 19  // Space (blank)
 
+/* =========================
+   Data Flow Architecture
+   =========================
+   Chinese Slave → Master Backend → Display (truncated) + Cloud (exact values)
+   
+   Example with value 17991:
+   1. Chinese slave sends: 17991 (actual value, may have decimals)
+   2. Backend storage:     17991.0 (float for precision) ← PRESERVED FOR CLOUD
+   3. Display shows:       17991 (truncated integer for demo)
+   4. Cloud transmission:  17991.0 (exact value from backend)
+   
+   IMPORTANT: Display truncation is ONLY for demo purposes. Backend float values
+   preserve exact values for cloud transmission. Use slaves[idx].total_flow
+   and slaves[idx].flow_rate directly when sending to cloud.
+   ========================= */
+
 typedef struct {
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
-  unsigned long total_flow;             // Last known total flow value
-  unsigned long flow_rate;              // Last known flow rate value
+  float total_flow;                     // Total flow value with EXACT decimals (e.g., 17991.628)
+                                        // For cloud transmission, use this value directly
+  float flow_rate;                      // Flow rate value with EXACT decimals (e.g., 12345.678)
+                                        // For cloud transmission, use this value directly
   unsigned long last_poll_ms;           // Last time this slave was polled
 } SlaveInfo;
 
@@ -132,7 +150,7 @@ volatile bit slave_disconnected = 0;  // At least one slave showing disconnect o
 volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 8  // Show "----" after 8 failures (8 � 600ms = ~5 seconds)
+#define MAX_CONSECUTIVE_FAILURES 8  // Show "----" after 8 failures (8 � 600ms = ~5 seconds)
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -155,6 +173,89 @@ unsigned char get_next_online_slave(unsigned char start_id);
 void handle_display_toggle(void);
 void handle_discovery(void);
 void handle_polling(void);
+void save_slaves_to_sprom(void);
+void load_slaves_from_sprom(void);
+
+/* =========================
+   SPROM Persistent Storage
+   ========================= */
+// SPROM address for slave table (using address 0x00 in SPROM)
+#define SPROM_SLAVE_TABLE_ADDR 0x00
+#define SPROM_MAGIC_BYTE1 0xA5
+#define SPROM_MAGIC_BYTE2 0x5A
+
+// Simple IAP functions for SPROM access
+void iap_trigger(void)
+{
+  set_IAPTRG_IAPGO;
+}
+
+unsigned char read_sprom_byte(unsigned char addr)
+{
+  unsigned char data_byte;
+  set_CHPCON_IAPEN;        // Enable IAP
+  IAPAL = addr;
+  IAPAH = 0x00;
+  IAPCN = BYTE_READ_SPROM;
+  iap_trigger();
+  data_byte = IAPFD;
+  clr_CHPCON_IAPEN;        // Disable IAP
+  return data_byte;
+}
+
+void write_sprom_byte(unsigned char addr, unsigned char data_byte)
+{
+  set_CHPCON_IAPEN;        // Enable IAP
+  IAPAL = addr;
+  IAPAH = 0x00;
+  IAPFD = data_byte;
+  IAPCN = BYTE_PROGRAM_SPROM;
+  iap_trigger();
+  clr_CHPCON_IAPEN;        // Disable IAP
+}
+
+// Save discovered slaves bitmap to SPROM
+void save_slaves_to_sprom(void)
+{
+  unsigned char i;
+  unsigned char bitmap = 0;
+  
+  // Create bitmap of discovered slaves (bit 0-4 for slave IDs 1-5)
+  for (i = 0; i < MAX_SLAVES; i++) {
+    if (slaves[i].discovered) {
+      bitmap |= (1 << i);
+    }
+  }
+  
+  // Write magic bytes and bitmap to SPROM
+  write_sprom_byte(SPROM_SLAVE_TABLE_ADDR, SPROM_MAGIC_BYTE1);
+  write_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 1, SPROM_MAGIC_BYTE2);
+  write_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 2, bitmap);
+}
+
+// Load discovered slaves from SPROM
+void load_slaves_from_sprom(void)
+{
+  unsigned char magic1, magic2, bitmap;
+  unsigned char i;
+  
+  // Read magic bytes to verify valid data
+  magic1 = read_sprom_byte(SPROM_SLAVE_TABLE_ADDR);
+  magic2 = read_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 1);
+  
+  if (magic1 == SPROM_MAGIC_BYTE1 && magic2 == SPROM_MAGIC_BYTE2) {
+    // Valid data found, restore slaves
+    bitmap = read_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 2);
+    
+    for (i = 0; i < MAX_SLAVES; i++) {
+      if (bitmap & (1 << i)) {
+        slaves[i].discovered = 1;
+        active_slave_count++;
+      }
+    }
+  }
+  // If no valid data, do nothing (slaves remain undiscovered)
+}
 
 /* =========================
    TIMER0 ISR: multiplex display
@@ -456,9 +557,12 @@ static bit modbus_parse_response(void)
   // Update slave info in the table
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  slaves[slave_idx].total_flow = total_val % 100000UL;
-  if (fr_val > 99999UL) fr_val = 99999UL;
-  slaves[slave_idx].flow_rate = fr_val;
+  // Store values as float to preserve any decimal precision from slave
+  // Chinese slave sends actual values (e.g., 17991 or 17991.xx)
+  // Store directly without scaling
+  slaves[slave_idx].total_flow = (float)total_val;
+  slaves[slave_idx].flow_rate = (float)fr_val;
+  
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
   
@@ -466,6 +570,9 @@ static bit modbus_parse_response(void)
   if (!slaves[slave_idx].discovered) {
     slaves[slave_idx].discovered = 1;
     active_slave_count++;
+    
+    // Save to SPROM so slave is remembered after restart
+    save_slaves_to_sprom();
     
     // Don't exit scanning mode immediately - let it complete 2 cycles
     // This ensures multiple slaves at startup are all discovered
@@ -479,8 +586,10 @@ static bit modbus_parse_response(void)
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    disp_total_u = slaves[slave_idx].total_flow;
-    disp_fr_u = slaves[slave_idx].flow_rate;
+    // Backend float values preserve exact decimals for cloud transmission
+    // Display shows truncated integer (cloud will use exact float values)
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
     disp_id_u = slave_id;
     update_display_digits();
     slave_disconnected = 0;
@@ -502,16 +611,18 @@ void update_display_digits(void)
   unsigned long temp;
   unsigned int temp_id;
   
-  // Calculate Total Flow digits (5 digits: 00000-99999)
-  temp = disp_total_u;
+  // Calculate Total Flow digits
+  // For values > 99999, show rightmost 5 digits on 5-digit display
+  temp = disp_total_u % 100000UL;
   disp_total_digits[4] = temp % 10; temp /= 10;  // ones
   disp_total_digits[3] = temp % 10; temp /= 10;  // tens
   disp_total_digits[2] = temp % 10; temp /= 10;  // hundreds
   disp_total_digits[1] = temp % 10; temp /= 10;  // thousands
   disp_total_digits[0] = temp % 10;              // ten-thousands
   
-  // Calculate Flow Rate digits (5 digits: 00000-99999)
-  temp = disp_fr_u;
+  // Calculate Flow Rate digits
+  // For values > 99999, show rightmost 5 digits on 5-digit display
+  temp = disp_fr_u % 100000UL;
   disp_fr_digits[4] = temp % 10; temp /= 10;  // ones
   disp_fr_digits[3] = temp % 10; temp /= 10;  // tens
   disp_fr_digits[2] = temp % 10; temp /= 10;  // hundreds
@@ -546,6 +657,9 @@ void init_slave_table(void)
   scanning_mode = 1;  // Start in scanning mode
   scanning_cycles = 0;  // Reset cycle counter
   scanning_mode_exited = 0;  // Reset exit flag for fresh start
+  
+  // Load previously discovered slaves from SPROM
+  load_slaves_from_sprom();
 }
 
 unsigned char get_next_online_slave(unsigned char start_id)
@@ -588,8 +702,9 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    disp_total_u = slaves[slave_idx].total_flow;
-    disp_fr_u = slaves[slave_idx].flow_rate;
+    // Backend float values preserve exact decimals for cloud transmission
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
     disp_id_u = current_display_id;
     update_display_digits();
   }
@@ -708,10 +823,8 @@ void handle_polling(void)
     return;  // Already waiting
   }
   
-  // During scanning mode, prioritize discovery over polling
-  if (scanning_mode) {
-    return;  // Let discovery happen first
-  }
+  // Poll known slaves immediately, even during scanning mode
+  // This allows previously discovered slaves (loaded from SPROM) to be polled right away
   
   if (active_slave_count == 0) {
     return;  // No slaves to poll
@@ -858,11 +971,11 @@ void main(void)
     // Handle display toggling between online slaves
     handle_display_toggle();
     
+    // Handle polling of known slaves (priority over discovery)
+    handle_polling();
+    
     // Handle discovery of new slaves
     handle_discovery();
-    
-    // Handle polling of known slaves
-    handle_polling();
 
     if (sw_reset == 0) {
       ms_delay(200);
