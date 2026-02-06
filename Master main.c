@@ -74,8 +74,8 @@ data unsigned char disp_id_digits[3] = {0,0,1};         // [100s, 10s, 1s]
    Multi-Slave Management
    ========================= */
 typedef struct {
-  bit online;                           // Slave is online
-  bit discovered;                       // Slave has been discovered at least once
+  unsigned char online;                 // Slave is online (0=offline, 1=online)
+  unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
   unsigned long total_flow;             // Last known total flow value
   unsigned long flow_rate;              // Last known flow rate value
