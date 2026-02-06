@@ -103,6 +103,7 @@ xdata unsigned long last_discovery_ms = 0;
 xdata unsigned long last_display_toggle_ms = 0;
 bit discovery_mode = 0;                 // In discovery scan mode
 bit scanning_mode = 1;                  // In initial scanning phase (show "Scan", "devices", "id")
+data unsigned char scanning_cycles = 0;  // Count discovery cycles during scanning mode
 data unsigned char current_request_slave_id = 0;  // ID of slave for current request
 
 /* =========================
@@ -459,8 +460,8 @@ static bit modbus_parse_response(void)
     slaves[slave_idx].discovered = 1;
     active_slave_count++;
     
-    // Exit scanning mode when first slave is discovered
-    scanning_mode = 0;
+    // Don't exit scanning mode immediately - let it complete 2 cycles
+    // This ensures multiple slaves at startup are all discovered
     
     // If this is the first slave discovered, set it as the displayed slave
     if (current_display_id == 0) {
@@ -536,6 +537,7 @@ void init_slave_table(void)
   current_display_id = 0;
   discovery_id = MIN_SLAVE_ID;
   scanning_mode = 1;  // Start in scanning mode
+  scanning_cycles = 0;  // Reset cycle counter
 }
 
 unsigned char get_next_online_slave(unsigned char start_id)
@@ -547,16 +549,16 @@ unsigned char get_next_online_slave(unsigned char start_id)
   id = start_id;
   if (id < MIN_SLAVE_ID || id > MAX_SLAVE_ID) id = MIN_SLAVE_ID;
   
-  // Check up to MAX_SLAVES times to find next online slave
+  // Check up to MAX_SLAVES times to find next discovered slave (online or offline)
   for (checks = 0; checks < MAX_SLAVES; checks++) {
-    if (slaves[id - 1].online) {
-      return id;
+    if (slaves[id - 1].discovered) {  // Changed from .online to .discovered
+      return id;  // Return any discovered slave, even if temporarily offline
     }
     id++;
     if (id > MAX_SLAVE_ID) id = MIN_SLAVE_ID;
   }
   
-  return 0;  // No online slaves found
+  return 0;  // No discovered slaves found
 }
 
 void update_display_for_current_slave(void)
@@ -640,16 +642,14 @@ void handle_discovery(void)
 {
   unsigned long discovery_interval;
   
-  // Periodic discovery scan when not all slaves discovered
-  if (active_slave_count >= MAX_SLAVES) {
-    return;  // All slots filled
-  }
+  // Always continue discovery to find new slaves or rediscover offline ones
+  // Don't stop discovery even when MAX_SLAVES reached
   
   // During scanning mode (startup), use faster discovery interval
   if (scanning_mode) {
     discovery_interval = 1000UL;  // 1 second during scanning mode for faster initial discovery
   } else {
-    discovery_interval = DISCOVERY_INTERVAL_MS;  // 5 seconds after first slave found
+    discovery_interval = DISCOVERY_INTERVAL_MS;  // 5 seconds after scanning mode
   }
   
   if ((ms_ticks - last_discovery_ms) < discovery_interval) {
@@ -676,6 +676,16 @@ void handle_discovery(void)
   discovery_id++;
   if (discovery_id > MAX_SLAVE_ID) {
     discovery_id = MIN_SLAVE_ID;
+    
+    // Increment cycle counter when wrapping around during scanning mode
+    if (scanning_mode) {
+      scanning_cycles++;
+      // Exit scanning mode after 2 complete cycles (10 seconds total with 1s interval)
+      // This ensures multiple slaves have time to be discovered
+      if (scanning_cycles >= 2) {
+        scanning_mode = 0;
+      }
+    }
   }
 }
 
@@ -821,29 +831,14 @@ void main(void)
             // Check if slave is disconnected (5 consecutive poll failures)
             if (slaves[slave_idx].consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
               slaves[slave_idx].online = 0;
-              if (slaves[slave_idx].discovered) {
-                active_slave_count--;
-                slaves[slave_idx].discovered = 0;  // Mark as not discovered to allow rediscovery
-              }
+              // DON'T remove discovered flag - keep slave in rotation showing "----"
+              // This allows the slave to stay in display toggle and be rediscovered
               
-              // If this was the displayed slave, try to switch to another online slave
+              // If this was the displayed slave, show disconnected but keep displaying it
               if (current_display_id == current_request_slave_id) {
                 slave_disconnected = 1;
                 update_display_digits();
-                
-                // Try to find another online slave to display
-                if (active_slave_count > 0) {
-                  unsigned char next_id = get_next_online_slave(MIN_SLAVE_ID);
-                  if (next_id != 0 && next_id != current_request_slave_id) {
-                    current_display_id = next_id;
-                    update_display_for_current_slave();
-                  } else {
-                    current_display_id = 0;  // No other slaves available
-                  }
-                } else {
-                  current_display_id = 0;  // No slaves online
-                  disp_id_u = 0;
-                }
+                // DON'T switch to another slave - keep showing this one with "----"
               }
             }
           }
