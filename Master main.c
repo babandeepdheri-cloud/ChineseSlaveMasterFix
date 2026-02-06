@@ -90,8 +90,8 @@ typedef struct {
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
-  unsigned long total_flow;             // Last known total flow value
-  unsigned long flow_rate;              // Last known flow rate value
+  float total_flow;                     // Last known total flow value (with decimal precision)
+  float flow_rate;                      // Last known flow rate value (with decimal precision)
   unsigned long last_poll_ms;           // Last time this slave was polled
 } SlaveInfo;
 
@@ -457,9 +457,9 @@ static bit modbus_parse_response(void)
   // Update slave info in the table
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  slaves[slave_idx].total_flow = total_val % 100000UL;
-  if (fr_val > 99999UL) fr_val = 99999UL;
-  slaves[slave_idx].flow_rate = fr_val;
+  // Convert to float (values are sent with 3 decimal places, divide by 1000)
+  slaves[slave_idx].total_flow = (float)total_val / 1000.0;
+  slaves[slave_idx].flow_rate = (float)fr_val / 1000.0;
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
   
@@ -480,8 +480,8 @@ static bit modbus_parse_response(void)
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    disp_total_u = slaves[slave_idx].total_flow;
-    disp_fr_u = slaves[slave_idx].flow_rate;
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;  // Cast float to unsigned long for display
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;      // Cast float to unsigned long for display
     disp_id_u = slave_id;
     update_display_digits();
     slave_disconnected = 0;
@@ -536,8 +536,8 @@ void init_slave_table(void)
     slaves[i].online = 0;
     slaves[i].discovered = 0;
     slaves[i].consecutive_failures = 0;
-    slaves[i].total_flow = 0;
-    slaves[i].flow_rate = 0;
+    slaves[i].total_flow = 0.0;  // Initialize float to 0.0
+    slaves[i].flow_rate = 0.0;   // Initialize float to 0.0
     slaves[i].last_poll_ms = 0;
   }
   active_slave_count = 0;
@@ -589,8 +589,8 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    disp_total_u = slaves[slave_idx].total_flow;
-    disp_fr_u = slaves[slave_idx].flow_rate;
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;  // Cast float to unsigned long for display
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;      // Cast float to unsigned long for display
     disp_id_u = current_display_id;
     update_display_digits();
   }
