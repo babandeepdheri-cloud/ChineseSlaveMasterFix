@@ -500,12 +500,10 @@ static bit modbus_parse_response(void)
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    // NOTE: Display rounding is ONLY for demo purposes
-    // Backend float values (slaves[slave_idx].total_flow) preserve exact decimals
-    // For cloud transmission, use the float values directly (e.g., 17991.628)
-    // Display shows rounded integer (e.g., 17992) for demo only
-    disp_total_u = (unsigned long)(slaves[slave_idx].total_flow + 0.5f);
-    disp_fr_u = (unsigned long)(slaves[slave_idx].flow_rate + 0.5f);
+    // Backend float values preserve exact decimals for cloud transmission
+    // Display shows truncated integer (cloud will use exact float values)
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
     disp_id_u = slave_id;
     update_display_digits();
     slave_disconnected = 0;
@@ -615,10 +613,9 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    // NOTE: Display rounding is ONLY for demo purposes
     // Backend float values preserve exact decimals for cloud transmission
-    disp_total_u = (unsigned long)(slaves[slave_idx].total_flow + 0.5f);
-    disp_fr_u = (unsigned long)(slaves[slave_idx].flow_rate + 0.5f);
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
     disp_id_u = current_display_id;
     update_display_digits();
   }
