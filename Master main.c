@@ -48,8 +48,8 @@ sbit signal = P1^7;
 #define MAX_SLAVES          5
 #define MIN_SLAVE_ID        1
 #define MAX_SLAVE_ID        5
-#define POLL_INTERVAL_MS    1000UL
-#define DISCOVERY_INTERVAL_MS  2000UL  // Scan for new slaves every 2 seconds for quick reconnection
+#define POLL_INTERVAL_MS    600UL   // Poll every 600ms (minimum safe per Chinese slave protocol)
+#define DISCOVERY_INTERVAL_MS  5000UL  // Discovery every 5 seconds (less aggressive to avoid conflicts)
 #define DISPLAY_TOGGLE_INTERVAL_MS  5000UL  // Toggle display every 5 seconds
 
 /* =========================
@@ -132,7 +132,7 @@ volatile bit slave_disconnected = 0;  // At least one slave showing disconnect o
 volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 5  // Show "----" after 5 consecutive failures (~5 seconds with 1s polling)
+#define MAX_CONSECUTIVE_FAILURES 8  // Show "----" after 8 failures (8 × 600ms = ~5 seconds)
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -170,7 +170,8 @@ void Timer0_ISR(void) interrupt 1
 
   // 2. Check if in scanning mode - display "Scan", "devices", "id"
   // Only show scanning display during initial startup (before scanning_mode_exited is set)
-  if (scanning_mode && !scanning_mode_exited) {
+  // Additional safeguard: Never show after 15 seconds from boot
+  if (scanning_mode && !scanning_mode_exited && (ms_ticks < 15000UL)) {
     switch (scan_d)
     {
       // --- LET (Total Flow) - show "Scan " ---
@@ -656,7 +657,7 @@ void handle_discovery(void)
   if (scanning_mode) {
     discovery_interval = 1000UL;  // 1 second during scanning mode for faster initial discovery
   } else {
-    discovery_interval = DISCOVERY_INTERVAL_MS;  // 2 seconds for continuous background discovery
+    discovery_interval = DISCOVERY_INTERVAL_MS;  // 5 seconds - less aggressive to prioritize polling
   }
   
   if ((ms_ticks - last_discovery_ms) < discovery_interval) {
