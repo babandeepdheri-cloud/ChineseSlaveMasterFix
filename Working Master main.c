@@ -482,9 +482,10 @@ static bit modbus_parse_response(void)
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    // Cast float to unsigned long for display (truncates to integer part)
-    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
-    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
+    // Round float to nearest integer by adding 0.5 before casting
+    // This ensures proper rounding: 17990.628 → 17991, 17990.4 → 17990
+    disp_total_u = (unsigned long)(slaves[slave_idx].total_flow + 0.5f);
+    disp_fr_u = (unsigned long)(slaves[slave_idx].flow_rate + 0.5f);
     disp_id_u = slave_id;
     update_display_digits();
     slave_disconnected = 0;
@@ -594,9 +595,10 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    // Cast float to unsigned long for display (truncates to integer part)
-    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
-    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
+    // Round float to nearest integer by adding 0.5 before casting
+    // This ensures proper rounding: 17990.628 → 17991, 17990.4 → 17990
+    disp_total_u = (unsigned long)(slaves[slave_idx].total_flow + 0.5f);
+    disp_fr_u = (unsigned long)(slaves[slave_idx].flow_rate + 0.5f);
     disp_id_u = current_display_id;
     update_display_digits();
   }
