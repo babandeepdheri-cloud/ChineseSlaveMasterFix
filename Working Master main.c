@@ -88,15 +88,15 @@ data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Ini
 /* =========================
    Data Flow Architecture
    =========================
-   Chinese Slave → Master Backend → Display (rounded) + Cloud (exact decimals)
+   Chinese Slave → Master Backend → Display (truncated) + Cloud (exact decimals)
    
    Example with value 17991.628:
    1. Chinese slave sends: 17991628 (scaled by 1000)
    2. Backend storage:     17991.628 (float with decimals) ← PRESERVED FOR CLOUD
-   3. Display shows:       17992 (rounded integer for demo)
+   3. Display shows:       17991 (truncated integer for demo)
    4. Cloud transmission:  17991.628 (exact decimals from backend)
    
-   IMPORTANT: Display rounding is ONLY for demo purposes. Backend float values
+   IMPORTANT: Display truncation is ONLY for demo purposes. Backend float values
    preserve exact decimals for cloud transmission. Use slaves[idx].total_flow
    and slaves[idx].flow_rate directly when sending to cloud.
    ========================= */
