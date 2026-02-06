@@ -49,7 +49,7 @@ sbit signal = P1^7;
 #define MIN_SLAVE_ID        1
 #define MAX_SLAVE_ID        5
 #define POLL_INTERVAL_MS    1000UL
-#define DISCOVERY_INTERVAL_MS  15000UL  // Scan for new slaves every 15 seconds
+#define DISCOVERY_INTERVAL_MS  5000UL  // Scan for new slaves every 5 seconds (faster discovery)
 #define DISPLAY_TOGGLE_INTERVAL_MS  5000UL  // Toggle display every 5 seconds
 
 /* =========================
@@ -63,12 +63,12 @@ xdata unsigned int soft_delay_counter = 0;
    ========================= */
 xdata volatile unsigned long disp_total_u = 0; 
 xdata volatile unsigned long disp_fr_u    = 0; 
-xdata volatile unsigned int  disp_id_u    = 1;
+xdata volatile unsigned int  disp_id_u    = 0;  // Initialize to 0 (no slave discovered)
 
 /* Pre-calculated digit arrays for ISR speed optimization */
 data unsigned char disp_total_digits[5] = {0,0,0,0,0};  // [10000s, 1000s, 100s, 10s, 1s]
 data unsigned char disp_fr_digits[5] = {0,0,0,0,0};     // [10000s, 1000s, 100s, 10s, 1s]
-data unsigned char disp_id_digits[3] = {0,0,1};         // [100s, 10s, 1s]
+data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Initialize to 000
 
 /* =========================
    Multi-Slave Management
@@ -422,10 +422,15 @@ static bit modbus_parse_response(void)
   if (!slaves[slave_idx].discovered) {
     slaves[slave_idx].discovered = 1;
     active_slave_count++;
+    
+    // If this is the first slave discovered, set it as the displayed slave
+    if (current_display_id == 0) {
+      current_display_id = slave_id;
+    }
   }
   slaves[slave_idx].online = 1;
   
-  // If this is the currently displayed slave, update display
+  // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
     disp_total_u = slaves[slave_idx].total_flow;
     disp_fr_u = slaves[slave_idx].flow_rate;
@@ -544,7 +549,28 @@ void handle_display_toggle(void)
 {
   unsigned char next_id;
   
-  // Toggle display every DISPLAY_TOGGLE_INTERVAL_MS
+  // If no slaves discovered yet, don't do anything
+  if (active_slave_count == 0) {
+    current_display_id = 0;
+    disp_id_u = 0;
+    return;
+  }
+  
+  // If only one slave, keep showing it (don't toggle)
+  if (active_slave_count == 1) {
+    if (current_display_id == 0) {
+      // First time - find the online slave
+      next_id = get_next_online_slave(MIN_SLAVE_ID);
+      if (next_id != 0) {
+        current_display_id = next_id;
+        update_display_for_current_slave();
+      }
+    }
+    // Don't toggle when only one slave - just keep showing it
+    return;
+  }
+  
+  // Multiple slaves - toggle display every DISPLAY_TOGGLE_INTERVAL_MS
   if ((ms_ticks - last_display_toggle_ms) < DISPLAY_TOGGLE_INTERVAL_MS) {
     return;
   }
@@ -558,13 +584,13 @@ void handle_display_toggle(void)
   } else {
     // Find next online slave after current one
     next_id = get_next_online_slave(current_display_id + 1);
-    if (next_id == 0 || next_id == current_display_id) {
-      // Wrap around or no change needed
+    if (next_id == 0) {
+      // Wrap around to first
       next_id = get_next_online_slave(MIN_SLAVE_ID);
     }
   }
   
-  if (next_id != 0 && next_id != current_display_id) {
+  if (next_id != 0) {
     current_display_id = next_id;
     update_display_for_current_slave();
   }
@@ -746,10 +772,24 @@ void main(void)
                 slaves[slave_idx].discovered = 0;  // Mark as not discovered to allow rediscovery
               }
               
-              // If this was the displayed slave, update display to show disconnected
+              // If this was the displayed slave, try to switch to another online slave
               if (current_display_id == current_request_slave_id) {
                 slave_disconnected = 1;
                 update_display_digits();
+                
+                // Try to find another online slave to display
+                if (active_slave_count > 0) {
+                  unsigned char next_id = get_next_online_slave(MIN_SLAVE_ID);
+                  if (next_id != 0 && next_id != current_request_slave_id) {
+                    current_display_id = next_id;
+                    update_display_for_current_slave();
+                  } else {
+                    current_display_id = 0;  // No other slaves available
+                  }
+                } else {
+                  current_display_id = 0;  // No slaves online
+                  disp_id_u = 0;
+                }
               }
             }
           }
