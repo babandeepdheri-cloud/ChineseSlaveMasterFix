@@ -89,8 +89,8 @@ typedef struct {
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
-  unsigned long total_flow;             // Total flow value from slave
-  unsigned long flow_rate;              // Flow rate value from slave
+  float total_flow;                     // Total flow value from slave (with decimals)
+  float flow_rate;                      // Flow rate value from slave (with decimals)
   unsigned long last_poll_ms;           // Last time this slave was polled
 } SlaveInfo;
 
@@ -456,11 +456,11 @@ static bit modbus_parse_response(void)
   // Update slave info in the table
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  // Store raw values from slave (rounding to nearest integer)
-  // Add 0.5 equivalent (500 for scale of 1000) before integer division for proper rounding
-  // This ensures 17991.628 rounds to 17992, and 17990.4 rounds to 17990
-  slaves[slave_idx].total_flow = (total_val + 500UL) / 1000UL;
-  slaves[slave_idx].flow_rate = (fr_val + 500UL) / 1000UL;
+  // Store values as float to preserve decimal precision
+  // Chinese slave sends values scaled by 1000 (e.g., 17991.628 → 17991628)
+  // Divide by 1000.0f to get actual value with decimals (17991628 → 17991.628)
+  slaves[slave_idx].total_flow = (float)total_val / 1000.0f;
+  slaves[slave_idx].flow_rate = (float)fr_val / 1000.0f;
   
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
@@ -482,8 +482,9 @@ static bit modbus_parse_response(void)
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    disp_total_u = slaves[slave_idx].total_flow;
-    disp_fr_u = slaves[slave_idx].flow_rate;
+    // Cast float to unsigned long for display (truncates to integer part)
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
     disp_id_u = slave_id;
     update_display_digits();
     slave_disconnected = 0;
@@ -593,8 +594,9 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    disp_total_u = slaves[slave_idx].total_flow;
-    disp_fr_u = slaves[slave_idx].flow_rate;
+    // Cast float to unsigned long for display (truncates to integer part)
+    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;
+    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;
     disp_id_u = current_display_id;
     update_display_digits();
   }
