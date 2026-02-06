@@ -85,12 +85,30 @@ data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Ini
 #define CHAR_i 18  // Letter i
 #define CHAR_SPACE 19  // Space (blank)
 
+/* =========================
+   Data Flow Architecture
+   =========================
+   Chinese Slave → Master Backend → Display (rounded) + Cloud (exact decimals)
+   
+   Example with value 17991.628:
+   1. Chinese slave sends: 17991628 (scaled by 1000)
+   2. Backend storage:     17991.628 (float with decimals) ← PRESERVED FOR CLOUD
+   3. Display shows:       17992 (rounded integer for demo)
+   4. Cloud transmission:  17991.628 (exact decimals from backend)
+   
+   IMPORTANT: Display rounding is ONLY for demo purposes. Backend float values
+   preserve exact decimals for cloud transmission. Use slaves[idx].total_flow
+   and slaves[idx].flow_rate directly when sending to cloud.
+   ========================= */
+
 typedef struct {
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
-  float total_flow;                     // Total flow value from slave (with decimals)
-  float flow_rate;                      // Flow rate value from slave (with decimals)
+  float total_flow;                     // Total flow value with EXACT decimals (e.g., 17991.628)
+                                        // For cloud transmission, use this value directly
+  float flow_rate;                      // Flow rate value with EXACT decimals (e.g., 12345.678)
+                                        // For cloud transmission, use this value directly
   unsigned long last_poll_ms;           // Last time this slave was polled
 } SlaveInfo;
 
@@ -482,8 +500,10 @@ static bit modbus_parse_response(void)
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    // Round float to nearest integer by adding 0.5 before casting
-    // This ensures proper rounding: 17990.628 → 17991, 17990.4 → 17990
+    // NOTE: Display rounding is ONLY for demo purposes
+    // Backend float values (slaves[slave_idx].total_flow) preserve exact decimals
+    // For cloud transmission, use the float values directly (e.g., 17991.628)
+    // Display shows rounded integer (e.g., 17992) for demo only
     disp_total_u = (unsigned long)(slaves[slave_idx].total_flow + 0.5f);
     disp_fr_u = (unsigned long)(slaves[slave_idx].flow_rate + 0.5f);
     disp_id_u = slave_id;
@@ -595,8 +615,8 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    // Round float to nearest integer by adding 0.5 before casting
-    // This ensures proper rounding: 17990.628 → 17991, 17990.4 → 17990
+    // NOTE: Display rounding is ONLY for demo purposes
+    // Backend float values preserve exact decimals for cloud transmission
     disp_total_u = (unsigned long)(slaves[slave_idx].total_flow + 0.5f);
     disp_fr_u = (unsigned long)(slaves[slave_idx].flow_rate + 0.5f);
     disp_id_u = current_display_id;
