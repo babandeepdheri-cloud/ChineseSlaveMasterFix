@@ -102,7 +102,7 @@ data unsigned char discovery_id = MIN_SLAVE_ID;  // Next ID to try discovering
 xdata unsigned long last_discovery_ms = 0;
 xdata unsigned long last_display_toggle_ms = 0;
 bit discovery_mode = 0;                 // In discovery scan mode
-bit scanning_mode = 1;                  // In initial scanning phase (show "Scan", "devices", "id")
+volatile bit scanning_mode = 1;         // In initial scanning phase (show "Scan", "devices", "id")
 data unsigned char scanning_cycles = 0;  // Count discovery cycles during scanning mode
 data unsigned char current_request_slave_id = 0;  // ID of slave for current request
 
@@ -127,8 +127,8 @@ xdata unsigned int modbus_error_count = 0;
 xdata volatile unsigned long last_request_sent_ms = 0;  // Track last request time globally 
 
 /* Connection status and DP flash control */
-bit slave_disconnected = 0;  // At least one slave showing disconnect on display
-bit data_received_flag = 0;
+volatile bit slave_disconnected = 0;  // At least one slave showing disconnect on display
+volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
 #define MAX_CONSECUTIVE_FAILURES 5  // Changed back to 5 per requirements
@@ -279,8 +279,12 @@ void Timer0_ISR(void) interrupt 1
     
     // 3. Handle DP flashing when data is received
     // Flash H_Segment (DP) for DP_FLASH_DURATION_MS after data received
-    if (data_received_flag && ((ms_ticks - dp_flash_start_ms) < DP_FLASH_DURATION_MS)) {
-      H_Segment=0;  // Turn on DP (decimal point)
+    if (data_received_flag) {
+      if ((ms_ticks - dp_flash_start_ms) < DP_FLASH_DURATION_MS) {
+        H_Segment=0;  // Turn on DP (decimal point)
+      } else {
+        data_received_flag = 0;  // Clear flag after flash duration expires
+      }
     }
   }
 
