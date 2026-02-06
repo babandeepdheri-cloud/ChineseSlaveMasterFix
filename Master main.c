@@ -45,8 +45,12 @@ sbit relay  = P1^0;
 sbit signal = P1^7;
 
 #define TOTAL_DIGITS        13
-#define CHINESE_SLAVE_ID    1
+#define MAX_SLAVES          5
+#define MIN_SLAVE_ID        1
+#define MAX_SLAVE_ID        5
 #define POLL_INTERVAL_MS    1000UL
+#define DISCOVERY_INTERVAL_MS  15000UL  // Scan for new slaves every 15 seconds
+#define DISPLAY_TOGGLE_INTERVAL_MS  5000UL  // Toggle display every 5 seconds
 
 /* =========================
    1ms tick (Timer2)
@@ -59,12 +63,34 @@ xdata unsigned int soft_delay_counter = 0;
    ========================= */
 xdata volatile unsigned long disp_total_u = 0; 
 xdata volatile unsigned long disp_fr_u    = 0; 
-xdata volatile unsigned int  disp_id_u    = CHINESE_SLAVE_ID;
+xdata volatile unsigned int  disp_id_u    = 1;
 
 /* Pre-calculated digit arrays for ISR speed optimization */
 data unsigned char disp_total_digits[5] = {0,0,0,0,0};  // [10000s, 1000s, 100s, 10s, 1s]
 data unsigned char disp_fr_digits[5] = {0,0,0,0,0};     // [10000s, 1000s, 100s, 10s, 1s]
 data unsigned char disp_id_digits[3] = {0,0,1};         // [100s, 10s, 1s]
+
+/* =========================
+   Multi-Slave Management
+   ========================= */
+typedef struct {
+  bit online;                           // Slave is online
+  bit discovered;                       // Slave has been discovered at least once
+  unsigned char consecutive_failures;   // Consecutive poll failures for this slave
+  unsigned long total_flow;             // Last known total flow value
+  unsigned long flow_rate;              // Last known flow rate value
+  unsigned long last_poll_ms;           // Last time this slave was polled
+} SlaveInfo;
+
+xdata SlaveInfo slaves[MAX_SLAVES];     // Slave info table (index 0-4 for IDs 1-5)
+data unsigned char active_slave_count = 0;  // Number of discovered online slaves
+data unsigned char current_poll_index = 0;  // Current slave being polled
+data unsigned char current_display_id = 0;  // Currently displayed slave (0 = none)
+data unsigned char discovery_id = MIN_SLAVE_ID;  // Next ID to try discovering
+xdata unsigned long last_discovery_ms = 0;
+xdata unsigned long last_display_toggle_ms = 0;
+bit discovery_mode = 0;                 // In discovery scan mode
+data unsigned char current_request_slave_id = 0;  // ID of slave for current request
 
 /* =========================
    RS485/Modbus Variables
@@ -87,12 +113,11 @@ xdata unsigned int modbus_error_count = 0;
 xdata volatile unsigned long last_request_sent_ms = 0;  // Track last request time globally 
 
 /* Connection status and DP flash control */
-data unsigned char consecutive_poll_failures = 0;
-bit slave_disconnected = 0;
+bit slave_disconnected = 0;  // At least one slave showing disconnect on display
 bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 10  // Increased from 5 to 10 for more tolerance
+#define MAX_CONSECUTIVE_FAILURES 5  // Changed back to 5 per requirements
 #define DASH_CHAR 10
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
@@ -110,6 +135,12 @@ void modbus_send_request(unsigned char slave_id, unsigned int start_addr, unsign
 void modbus_rx_task(void);
 static unsigned int modbus_crc16(const unsigned char *buf, unsigned char len);
 static bit modbus_parse_response(void);
+void init_slave_table(void);
+void update_display_for_current_slave(void);
+unsigned char get_next_online_slave(unsigned char start_id);
+void handle_display_toggle(void);
+void handle_discovery(void);
+void handle_polling(void);
 
 /* =========================
    TIMER0 ISR: multiplex display
@@ -347,11 +378,21 @@ static bit modbus_parse_response(void)
   unsigned int crc_recv, crc_calc;
   unsigned int high_word, low_word;
   unsigned long total_val, fr_val;
+  unsigned char slave_id;
+  unsigned char slave_idx;
   
   // Expected response: 1(ID) + 1(FC) + 1(count) + 28(data) + 2(CRC) = 33 bytes
   if (modbus_rx_len != 33) return 0;
   
-  if (modbus_rx_buf[0] != CHINESE_SLAVE_ID || modbus_rx_buf[1] != 0x03) return 0;
+  slave_id = modbus_rx_buf[0];
+  
+  // Check if this is a valid slave ID (1-5)
+  if (slave_id < MIN_SLAVE_ID || slave_id > MAX_SLAVE_ID) return 0;
+  
+  // Check if response is for the slave we requested
+  if (slave_id != current_request_slave_id) return 0;
+  
+  if (modbus_rx_buf[1] != 0x03) return 0;
   
   // Check byte count field (should be 28 for 14 registers)
   if (modbus_rx_buf[2] != 28) return 0;
@@ -368,12 +409,30 @@ static bit modbus_parse_response(void)
   low_word = ((unsigned int)modbus_rx_buf[15] << 8) | modbus_rx_buf[16];
   total_val = ((unsigned long)high_word << 16) | low_word;
   
-  disp_total_u = total_val % 100000UL;
-  if (fr_val > 99999UL) fr_val = 99999UL;
-  disp_fr_u = fr_val;
+  // Update slave info in the table
+  slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  // Update pre-calculated digit arrays for ISR
-  update_display_digits();
+  slaves[slave_idx].total_flow = total_val % 100000UL;
+  if (fr_val > 99999UL) fr_val = 99999UL;
+  slaves[slave_idx].flow_rate = fr_val;
+  slaves[slave_idx].consecutive_failures = 0;
+  slaves[slave_idx].last_poll_ms = ms_ticks;
+  
+  // Mark as discovered and online if this is first time
+  if (!slaves[slave_idx].discovered) {
+    slaves[slave_idx].discovered = 1;
+    active_slave_count++;
+  }
+  slaves[slave_idx].online = 1;
+  
+  // If this is the currently displayed slave, update display
+  if (current_display_id == slave_id) {
+    disp_total_u = slaves[slave_idx].total_flow;
+    disp_fr_u = slaves[slave_idx].flow_rate;
+    disp_id_u = slave_id;
+    update_display_digits();
+    slave_disconnected = 0;
+  }
   
   // Set data received flag and start DP flash timer
   data_received_flag = 1;
@@ -414,8 +473,185 @@ void update_display_digits(void)
   disp_id_digits[0] = temp_id % 10;                 // hundreds
 }
 
+/* =========================
+   Slave Management Functions
+   ========================= */
+void init_slave_table(void)
+{
+  unsigned char i;
+  for (i = 0; i < MAX_SLAVES; i++) {
+    slaves[i].online = 0;
+    slaves[i].discovered = 0;
+    slaves[i].consecutive_failures = 0;
+    slaves[i].total_flow = 0;
+    slaves[i].flow_rate = 0;
+    slaves[i].last_poll_ms = 0;
+  }
+  active_slave_count = 0;
+  current_poll_index = 0;
+  current_display_id = 0;
+  discovery_id = MIN_SLAVE_ID;
+}
+
+unsigned char get_next_online_slave(unsigned char start_id)
+{
+  unsigned char id, checks;
+  
+  if (active_slave_count == 0) return 0;
+  
+  id = start_id;
+  if (id < MIN_SLAVE_ID || id > MAX_SLAVE_ID) id = MIN_SLAVE_ID;
+  
+  // Check up to MAX_SLAVES times to find next online slave
+  for (checks = 0; checks < MAX_SLAVES; checks++) {
+    if (slaves[id - 1].online) {
+      return id;
+    }
+    id++;
+    if (id > MAX_SLAVE_ID) id = MIN_SLAVE_ID;
+  }
+  
+  return 0;  // No online slaves found
+}
+
+void update_display_for_current_slave(void)
+{
+  unsigned char slave_idx;
+  
+  if (current_display_id == 0 || current_display_id < MIN_SLAVE_ID || current_display_id > MAX_SLAVE_ID) {
+    // No valid slave to display
+    return;
+  }
+  
+  slave_idx = current_display_id - 1;
+  
+  if (!slaves[slave_idx].online) {
+    // Slave is offline - show dashes
+    slave_disconnected = 1;
+    disp_id_u = current_display_id;
+    update_display_digits();
+  } else {
+    // Slave is online - show its data
+    slave_disconnected = 0;
+    disp_total_u = slaves[slave_idx].total_flow;
+    disp_fr_u = slaves[slave_idx].flow_rate;
+    disp_id_u = current_display_id;
+    update_display_digits();
+  }
+}
+
+void handle_display_toggle(void)
+{
+  unsigned char next_id;
+  
+  // Toggle display every DISPLAY_TOGGLE_INTERVAL_MS
+  if ((ms_ticks - last_display_toggle_ms) < DISPLAY_TOGGLE_INTERVAL_MS) {
+    return;
+  }
+  
+  last_display_toggle_ms = ms_ticks;
+  
+  // Find next online slave to display
+  if (current_display_id == 0) {
+    // First time - find first online slave
+    next_id = get_next_online_slave(MIN_SLAVE_ID);
+  } else {
+    // Find next online slave after current one
+    next_id = get_next_online_slave(current_display_id + 1);
+    if (next_id == 0 || next_id == current_display_id) {
+      // Wrap around or no change needed
+      next_id = get_next_online_slave(MIN_SLAVE_ID);
+    }
+  }
+  
+  if (next_id != 0 && next_id != current_display_id) {
+    current_display_id = next_id;
+    update_display_for_current_slave();
+  }
+}
+
+void handle_discovery(void)
+{
+  // Periodic discovery scan when not all slaves discovered
+  if (active_slave_count >= MAX_SLAVES) {
+    return;  // All slots filled
+  }
+  
+  if ((ms_ticks - last_discovery_ms) < DISCOVERY_INTERVAL_MS) {
+    return;  // Not time yet
+  }
+  
+  // Check if we can send a request (respect timing)
+  if (waiting_for_response) {
+    return;  // Already waiting for response
+  }
+  
+  if ((ms_ticks - last_request_sent_ms) < MIN_REQUEST_INTERVAL_MS) {
+    return;  // Too soon
+  }
+  
+  // Try to discover next slave ID
+  last_discovery_ms = ms_ticks;
+  discovery_mode = 1;
+  current_request_slave_id = discovery_id;
+  modbus_retry_count = 0;
+  modbus_send_request(discovery_id, 0x0000, 14);
+  
+  // Move to next ID for next discovery cycle
+  discovery_id++;
+  if (discovery_id > MAX_SLAVE_ID) {
+    discovery_id = MIN_SLAVE_ID;
+  }
+}
+
+void handle_polling(void)
+{
+  unsigned char slave_id;
+  unsigned char slave_idx;
+  unsigned char checks;
+  
+  if (waiting_for_response) {
+    return;  // Already waiting
+  }
+  
+  if (active_slave_count == 0) {
+    return;  // No slaves to poll
+  }
+  
+  if ((ms_ticks - last_request_sent_ms) < MIN_REQUEST_INTERVAL_MS) {
+    return;  // Too soon
+  }
+  
+  // Find next online slave to poll in round-robin fashion
+  slave_id = current_poll_index + 1;
+  if (slave_id < MIN_SLAVE_ID) slave_id = MIN_SLAVE_ID;
+  if (slave_id > MAX_SLAVE_ID) slave_id = MIN_SLAVE_ID;
+  
+  for (checks = 0; checks < MAX_SLAVES; checks++) {
+    slave_idx = slave_id - 1;
+    
+    if (slaves[slave_idx].discovered) {
+      // This slave has been discovered, poll it
+      // Check if enough time passed since last poll of this specific slave
+      if ((ms_ticks - slaves[slave_idx].last_poll_ms) >= POLL_INTERVAL_MS) {
+        current_poll_index = slave_id;
+        current_request_slave_id = slave_id;
+        discovery_mode = 0;
+        modbus_retry_count = 0;
+        modbus_send_request(slave_id, 0x0000, 14);
+        return;
+      }
+    }
+    
+    slave_id++;
+    if (slave_id > MAX_SLAVE_ID) slave_id = MIN_SLAVE_ID;
+  }
+}
+
 void modbus_rx_task(void)
 {
+  unsigned char slave_idx;
+  
   if (modbus_rx_len > 0 && !modbus_frame_ready) {
     if ((ms_ticks - last_rx_ms) >= 5) modbus_frame_ready = 1;
   }
@@ -423,11 +659,9 @@ void modbus_rx_task(void)
   if (!modbus_frame_ready) return;
   
   if (modbus_parse_response()) {
-    // Success! Reset retry counter and consecutive failures
+    // Success! Reset retry counter
     waiting_for_response = 0;
     modbus_retry_count = 0;
-    consecutive_poll_failures = 0;
-    slave_disconnected = 0;  // Mark as connected
   } else {
     // Parse failed - will retry via timeout mechanism
     modbus_error_count++;
@@ -473,7 +707,8 @@ void main(void)
   uart0_init_9600_timer3();
   ms_delay(500);
   
-  // Initialize digit arrays
+  // Initialize slave table and digit arrays
+  init_slave_table();
   update_display_digits();
 
   while (1)
@@ -490,9 +725,9 @@ void main(void)
         if (modbus_retry_count < MODBUS_MAX_RETRIES) {
           // Check if enough time has passed since last request (Chinese slave requirement)
           if ((ms_ticks - last_request_sent_ms) >= MIN_REQUEST_INTERVAL_MS) {
-            // Retry the request
+            // Retry the request to same slave
             modbus_retry_count++;
-            modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
+            modbus_send_request(current_request_slave_id, 0x0000, 14);
           }
           // else: wait for next loop iteration to retry
         } else {
@@ -500,35 +735,50 @@ void main(void)
           waiting_for_response = 0;
           modbus_retry_count = 0;
           
-          // Increment consecutive poll failures
-          consecutive_poll_failures++;
-          
-          // Check if slave is disconnected (10 consecutive poll failures)
-          if (consecutive_poll_failures >= MAX_CONSECUTIVE_FAILURES) {
-            slave_disconnected = 1;
+          // Increment consecutive poll failures for this specific slave
+          if (current_request_slave_id >= MIN_SLAVE_ID && current_request_slave_id <= MAX_SLAVE_ID) {
+            unsigned char slave_idx = current_request_slave_id - 1;
+            slaves[slave_idx].consecutive_failures++;
+            
+            // Check if slave is disconnected (5 consecutive poll failures)
+            if (slaves[slave_idx].consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+              slaves[slave_idx].online = 0;
+              if (slaves[slave_idx].discovered) {
+                active_slave_count--;
+                slaves[slave_idx].discovered = 0;  // Mark as not discovered to allow rediscovery
+              }
+              
+              // If this was the displayed slave, update display to show disconnected
+              if (current_display_id == current_request_slave_id) {
+                slave_disconnected = 1;
+                update_display_digits();
+              }
+            }
           }
         }
       }
     }
 
-    if (!waiting_for_response) {
-      if ((ms_ticks - last_poll_ms) >= POLL_INTERVAL_MS) {
-        // Also check Chinese slave timing requirement
-        if ((ms_ticks - last_request_sent_ms) >= MIN_REQUEST_INTERVAL_MS) {
-          last_poll_ms = ms_ticks;
-          modbus_retry_count = 0;  // Reset retry counter for new request
-          modbus_send_request(CHINESE_SLAVE_ID, 0x0000, 14);
-        }
-        // else: wait for next loop iteration
-      }
-    }
+    // Handle display toggling between online slaves
+    handle_display_toggle();
+    
+    // Handle discovery of new slaves
+    handle_discovery();
+    
+    // Handle polling of known slaves
+    handle_polling();
 
     if (sw_reset == 0) {
       ms_delay(200);
       if (sw_reset == 0) {
+        // Reset all slaves data
+        init_slave_table();
         disp_total_u = 0;
         disp_fr_u = 0;
-        update_display_digits();  // Update digit arrays after reset
+        disp_id_u = 0;
+        current_display_id = 0;
+        slave_disconnected = 0;
+        update_display_digits();
         ms_delay(200);
       }
       while (sw_reset == 0);
