@@ -48,7 +48,8 @@ sbit signal = P1^7;
 #define MAX_SLAVES          5
 #define MIN_SLAVE_ID        1
 #define MAX_SLAVE_ID        5
-#define POLL_INTERVAL_MS    600UL   // Poll every 600ms (minimum safe per Chinese slave protocol)
+#define POLL_CYCLE_MS       1000UL  // Base polling cycle (1 second)
+#define TIME_SLOT_MS        200UL   // Time slot per slave (200ms × 5 = 1000ms cycle)
 #define DISCOVERY_INTERVAL_MS  5000UL  // Discovery every 5 seconds (less aggressive to avoid conflicts)
 #define DISPLAY_TOGGLE_INTERVAL_MS  5000UL  // Toggle display every 5 seconds
 
@@ -132,7 +133,7 @@ volatile bit slave_disconnected = 0;  // At least one slave showing disconnect o
 volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 8  // Show "----" after 8 failures (8 × 600ms = ~5 seconds)
+#define MAX_CONSECUTIVE_FAILURES 5  // Show "----" after 5 failures (5 × 1s = 5 seconds with staggered polling)
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -649,6 +650,8 @@ void handle_display_toggle(void)
 void handle_discovery(void)
 {
   unsigned long discovery_interval;
+  unsigned long current_cycle_position;
+  unsigned long discovery_time_slot;
   
   // Always continue discovery to find new slaves or rediscover offline ones
   // Don't stop discovery even when MAX_SLAVES reached
@@ -673,26 +676,36 @@ void handle_discovery(void)
     return;  // Too soon
   }
   
-  // Try to discover next slave ID
-  last_discovery_ms = ms_ticks;
-  discovery_mode = 1;
-  current_request_slave_id = discovery_id;
-  modbus_retry_count = 0;
-  modbus_send_request(discovery_id, 0x0000, 14);
+  // Use time slots to avoid collision with polling
+  // Discovery happens in second half of each slave's time slot (100-199ms within slot)
+  current_cycle_position = ms_ticks % POLL_CYCLE_MS;
+  discovery_time_slot = (discovery_id - 1) * TIME_SLOT_MS + 100;  // Offset by 100ms into slot
   
-  // Move to next ID for next discovery cycle
-  discovery_id++;
-  if (discovery_id > MAX_SLAVE_ID) {
-    discovery_id = MIN_SLAVE_ID;
+  // Only send discovery if we're in the right time slot (with 50ms window)
+  if (current_cycle_position >= discovery_time_slot && 
+      current_cycle_position < (discovery_time_slot + 50)) {
     
-    // Increment cycle counter when wrapping around during scanning mode
-    if (scanning_mode && !scanning_mode_exited) {
-      scanning_cycles++;
-      // Exit scanning mode after 2 complete cycles (10 seconds total with 1s interval)
-      // This ensures multiple slaves have time to be discovered
-      if (scanning_cycles >= 2) {
-        scanning_mode = 0;
-        scanning_mode_exited = 1;  // Mark that we've exited - prevents re-entry
+    // Try to discover next slave ID
+    last_discovery_ms = ms_ticks;
+    discovery_mode = 1;
+    current_request_slave_id = discovery_id;
+    modbus_retry_count = 0;
+    modbus_send_request(discovery_id, 0x0000, 14);
+    
+    // Move to next ID for next discovery cycle
+    discovery_id++;
+    if (discovery_id > MAX_SLAVE_ID) {
+      discovery_id = MIN_SLAVE_ID;
+      
+      // Increment cycle counter when wrapping around during scanning mode
+      if (scanning_mode && !scanning_mode_exited) {
+        scanning_cycles++;
+        // Exit scanning mode after 2 complete cycles (10 seconds total with 1s interval)
+        // This ensures multiple slaves have time to be discovered
+        if (scanning_cycles >= 2) {
+          scanning_mode = 0;
+          scanning_mode_exited = 1;  // Mark that we've exited - prevents re-entry
+        }
       }
     }
   }
@@ -702,7 +715,8 @@ void handle_polling(void)
 {
   unsigned char slave_id;
   unsigned char slave_idx;
-  unsigned char checks;
+  unsigned long current_cycle_position;
+  unsigned long slave_time_slot;
   
   if (waiting_for_response) {
     return;  // Already waiting
@@ -721,29 +735,36 @@ void handle_polling(void)
     return;  // Too soon
   }
   
-  // Find next online slave to poll in round-robin fashion
-  slave_id = current_poll_index + 1;
-  if (slave_id < MIN_SLAVE_ID) slave_id = MIN_SLAVE_ID;
-  if (slave_id > MAX_SLAVE_ID) slave_id = MIN_SLAVE_ID;
+  // Calculate position within current 1-second cycle (0-999ms)
+  current_cycle_position = ms_ticks % POLL_CYCLE_MS;
   
-  for (checks = 0; checks < MAX_SLAVES; checks++) {
+  // Check each discovered slave to see if it's their time slot
+  for (slave_id = MIN_SLAVE_ID; slave_id <= MAX_SLAVE_ID; slave_id++) {
     slave_idx = slave_id - 1;
     
-    if (slaves[slave_idx].discovered) {
-      // This slave has been discovered, poll it
-      // Check if enough time passed since last poll of this specific slave
-      if ((ms_ticks - slaves[slave_idx].last_poll_ms) >= POLL_INTERVAL_MS) {
+    if (!slaves[slave_idx].discovered) {
+      continue;  // Skip undiscovered slaves
+    }
+    
+    // Calculate this slave's time slot within the cycle
+    // Slave 1: 0-199ms, Slave 2: 200-399ms, Slave 3: 400-599ms, etc.
+    slave_time_slot = (slave_id - 1) * TIME_SLOT_MS;
+    
+    // Check if we're in this slave's time slot (with 50ms window)
+    if (current_cycle_position >= slave_time_slot && 
+        current_cycle_position < (slave_time_slot + 50)) {
+      
+      // Check if this slave hasn't been polled recently (at least 900ms ago)
+      // This prevents double-polling in the same cycle
+      if ((ms_ticks - slaves[slave_idx].last_poll_ms) >= (POLL_CYCLE_MS - 100)) {
         current_poll_index = slave_id;
         current_request_slave_id = slave_id;
         discovery_mode = 0;
         modbus_retry_count = 0;
         modbus_send_request(slave_id, 0x0000, 14);
-        return;
+        return;  // Poll sent, exit
       }
     }
-    
-    slave_id++;
-    if (slave_id > MAX_SLAVE_ID) slave_id = MIN_SLAVE_ID;
   }
 }
 
