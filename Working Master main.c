@@ -431,6 +431,7 @@ unsigned long ieee754_to_ulong(unsigned long raw)
 {
   unsigned char exponent;
   unsigned long mantissa;
+  unsigned long result;
   int shift;
   
   // Extract exponent (bits 30-23)
@@ -442,19 +443,21 @@ unsigned long ieee754_to_ulong(unsigned long raw)
   // Extract mantissa and add implicit leading 1 bit (24-bit value)
   mantissa = (raw & 0x007FFFFFUL) | 0x00800000UL;
   
-  // shift = exponent - bias - 23 = exponent - 150
-  // Positive shift: value >= 2^24, shift mantissa left
-  // Negative shift: value < 2^24, shift mantissa right to get integer part
+  // shift = exponent - bias(127) - mantissa_bits(23) = exponent - 150
   shift = (int)exponent - 150;
   
   if (shift >= 0) {
-    if (shift > 8) return 99999UL;  // Overflow for 5-digit display
-    return mantissa << (unsigned char)shift;
+    if (shift > 8) return 99999UL;  // Prevent unsigned long overflow (24-bit mantissa max shift = 8)
+    result = mantissa << (unsigned char)shift;
   } else {
     shift = -shift;
     if (shift >= 24) return 0;
-    return mantissa >> (unsigned char)shift;
+    result = mantissa >> (unsigned char)shift;
   }
+  
+  // Cap at 99999 for 5-digit display
+  if (result > 99999UL) return 99999UL;
+  return result;
 }
 
 /* =========================
@@ -533,12 +536,10 @@ static bit modbus_parse_response(void)
   slaves[slave_idx].total_flow_raw = total_raw;
   slaves[slave_idx].flow_rate_raw = fr_raw;
   
-  // Convert IEEE 754 float to integer part for display (capped at 99999 for 5-digit display)
+  // Convert IEEE 754 float to integer part for display (capped at 99999 inside ieee754_to_ulong)
   slaves[slave_idx].total_flow = ieee754_to_ulong(total_raw);
-  if (slaves[slave_idx].total_flow > 99999UL) slaves[slave_idx].total_flow = 99999UL;
   
   slaves[slave_idx].flow_rate = ieee754_to_ulong(fr_raw);
-  if (slaves[slave_idx].flow_rate > 99999UL) slaves[slave_idx].flow_rate = 99999UL;
   
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
