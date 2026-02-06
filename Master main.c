@@ -650,8 +650,6 @@ void handle_polling(void)
 
 void modbus_rx_task(void)
 {
-  unsigned char slave_idx;
-  
   if (modbus_rx_len > 0 && !modbus_frame_ready) {
     if ((ms_ticks - last_rx_ms) >= 5) modbus_frame_ready = 1;
   }
