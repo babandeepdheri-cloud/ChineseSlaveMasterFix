@@ -173,6 +173,89 @@ unsigned char get_next_online_slave(unsigned char start_id);
 void handle_display_toggle(void);
 void handle_discovery(void);
 void handle_polling(void);
+void save_slaves_to_sprom(void);
+void load_slaves_from_sprom(void);
+
+/* =========================
+   SPROM Persistent Storage
+   ========================= */
+// SPROM address for slave table (using address 0x00 in SPROM)
+#define SPROM_SLAVE_TABLE_ADDR 0x00
+#define SPROM_MAGIC_BYTE1 0xA5
+#define SPROM_MAGIC_BYTE2 0x5A
+
+// Simple IAP functions for SPROM access
+void iap_trigger(void)
+{
+  set_IAPTRG_IAPGO;
+}
+
+unsigned char read_sprom_byte(unsigned char addr)
+{
+  unsigned char data_byte;
+  set_CHPCON_IAPEN;        // Enable IAP
+  IAPAL = addr;
+  IAPAH = 0x00;
+  IAPCN = BYTE_READ_SPROM;
+  iap_trigger();
+  data_byte = IAPFD;
+  clr_CHPCON_IAPEN;        // Disable IAP
+  return data_byte;
+}
+
+void write_sprom_byte(unsigned char addr, unsigned char data_byte)
+{
+  set_CHPCON_IAPEN;        // Enable IAP
+  IAPAL = addr;
+  IAPAH = 0x00;
+  IAPFD = data_byte;
+  IAPCN = BYTE_PROGRAM_SPROM;
+  iap_trigger();
+  clr_CHPCON_IAPEN;        // Disable IAP
+}
+
+// Save discovered slaves bitmap to SPROM
+void save_slaves_to_sprom(void)
+{
+  unsigned char i;
+  unsigned char bitmap = 0;
+  
+  // Create bitmap of discovered slaves (bit 0-4 for slave IDs 1-5)
+  for (i = 0; i < MAX_SLAVES; i++) {
+    if (slaves[i].discovered) {
+      bitmap |= (1 << i);
+    }
+  }
+  
+  // Write magic bytes and bitmap to SPROM
+  write_sprom_byte(SPROM_SLAVE_TABLE_ADDR, SPROM_MAGIC_BYTE1);
+  write_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 1, SPROM_MAGIC_BYTE2);
+  write_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 2, bitmap);
+}
+
+// Load discovered slaves from SPROM
+void load_slaves_from_sprom(void)
+{
+  unsigned char magic1, magic2, bitmap;
+  unsigned char i;
+  
+  // Read magic bytes to verify valid data
+  magic1 = read_sprom_byte(SPROM_SLAVE_TABLE_ADDR);
+  magic2 = read_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 1);
+  
+  if (magic1 == SPROM_MAGIC_BYTE1 && magic2 == SPROM_MAGIC_BYTE2) {
+    // Valid data found, restore slaves
+    bitmap = read_sprom_byte(SPROM_SLAVE_TABLE_ADDR + 2);
+    
+    for (i = 0; i < MAX_SLAVES; i++) {
+      if (bitmap & (1 << i)) {
+        slaves[i].discovered = 1;
+        active_slave_count++;
+      }
+    }
+  }
+  // If no valid data, do nothing (slaves remain undiscovered)
+}
 
 /* =========================
    TIMER0 ISR: multiplex display
@@ -488,6 +571,9 @@ static bit modbus_parse_response(void)
     slaves[slave_idx].discovered = 1;
     active_slave_count++;
     
+    // Save to SPROM so slave is remembered after restart
+    save_slaves_to_sprom();
+    
     // Don't exit scanning mode immediately - let it complete 2 cycles
     // This ensures multiple slaves at startup are all discovered
     
@@ -571,6 +657,9 @@ void init_slave_table(void)
   scanning_mode = 1;  // Start in scanning mode
   scanning_cycles = 0;  // Reset cycle counter
   scanning_mode_exited = 0;  // Reset exit flag for fresh start
+  
+  // Load previously discovered slaves from SPROM
+  load_slaves_from_sprom();
 }
 
 unsigned char get_next_online_slave(unsigned char start_id)
