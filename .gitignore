@@ -1,0 +1,28 @@
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Build artifacts
+*.o
+*.obj
+*.hex
+*.bin
+*.lst
+*.map
+*.asm
+*.rel
+*.rst
+*.sym
+*.lk
+*.mem
+*.lst
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
