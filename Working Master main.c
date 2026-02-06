@@ -132,7 +132,7 @@ volatile bit slave_disconnected = 0;  // At least one slave showing disconnect o
 volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 8  // Show "----" after 8 failures (8 × 600ms = ~5 seconds)
+#define MAX_CONSECUTIVE_FAILURES 8  // Show "----" after 8 failures (8 ï¿½ 600ms = ~5 seconds)
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -456,8 +456,9 @@ static bit modbus_parse_response(void)
   // Update slave info in the table
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  slaves[slave_idx].total_flow = total_val % 100000UL;
-  if (fr_val > 99999UL) fr_val = 99999UL;
+  // Store full values for backend/cloud transmission
+  // Display will show integer part only (handled in update_display_digits)
+  slaves[slave_idx].total_flow = total_val;
   slaves[slave_idx].flow_rate = fr_val;
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
@@ -502,16 +503,18 @@ void update_display_digits(void)
   unsigned long temp;
   unsigned int temp_id;
   
-  // Calculate Total Flow digits (5 digits: 00000-99999)
-  temp = disp_total_u;
+  // Calculate Total Flow digits
+  // Display integer part - for values > 99999, show rightmost 5 digits
+  temp = disp_total_u % 100000UL;
   disp_total_digits[4] = temp % 10; temp /= 10;  // ones
   disp_total_digits[3] = temp % 10; temp /= 10;  // tens
   disp_total_digits[2] = temp % 10; temp /= 10;  // hundreds
   disp_total_digits[1] = temp % 10; temp /= 10;  // thousands
   disp_total_digits[0] = temp % 10;              // ten-thousands
   
-  // Calculate Flow Rate digits (5 digits: 00000-99999)
-  temp = disp_fr_u;
+  // Calculate Flow Rate digits
+  // Display integer part - for values > 99999, show rightmost 5 digits
+  temp = disp_fr_u % 100000UL;
   disp_fr_digits[4] = temp % 10; temp /= 10;  // ones
   disp_fr_digits[3] = temp % 10; temp /= 10;  // tens
   disp_fr_digits[2] = temp % 10; temp /= 10;  // hundreds
