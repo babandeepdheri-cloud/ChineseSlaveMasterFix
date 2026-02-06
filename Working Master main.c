@@ -51,7 +51,6 @@ sbit signal = P1^7;
 #define POLL_INTERVAL_MS    600UL   // Poll every 600ms (minimum safe per Chinese slave protocol)
 #define DISCOVERY_INTERVAL_MS  5000UL  // Discovery every 5 seconds (less aggressive to avoid conflicts)
 #define DISPLAY_TOGGLE_INTERVAL_MS  5000UL  // Toggle display every 5 seconds
-#define FLOW_SCALE_FACTOR   1000UL  // Chinese slave sends values scaled by 1000 (3 decimal places)
 
 /* =========================
    1ms tick (Timer2)
@@ -90,10 +89,8 @@ typedef struct {
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
-  unsigned long total_flow_raw;         // Raw total flow value from slave (for cloud transmission)
-  unsigned long flow_rate_raw;          // Raw flow rate value from slave (for cloud transmission)
-  unsigned long total_flow;             // Display value: integer part of total flow
-  unsigned long flow_rate;              // Display value: integer part of flow rate
+  unsigned long total_flow;             // Total flow value from slave
+  unsigned long flow_rate;              // Flow rate value from slave
   unsigned long last_poll_ms;           // Last time this slave was polled
 } SlaveInfo;
 
@@ -459,15 +456,11 @@ static bit modbus_parse_response(void)
   // Update slave info in the table
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  // Store raw values for backend/cloud transmission (with decimals)
-  slaves[slave_idx].total_flow_raw = total_val;
-  slaves[slave_idx].flow_rate_raw = fr_val;
-  
-  // Calculate display values: integer part (truncate decimals)
-  // Chinese slave sends values scaled by FLOW_SCALE_FACTOR (e.g., 17991628 for 17991.628)
-  // Divide to get integer part only
-  slaves[slave_idx].total_flow = total_val / FLOW_SCALE_FACTOR;
-  slaves[slave_idx].flow_rate = fr_val / FLOW_SCALE_FACTOR;
+  // Store raw values from slave (rounding to nearest integer)
+  // Add 0.5 equivalent (500 for scale of 1000) before integer division for proper rounding
+  // This ensures 17991.628 rounds to 17992, and 17990.4 rounds to 17990
+  slaves[slave_idx].total_flow = (total_val + 500UL) / 1000UL;
+  slaves[slave_idx].flow_rate = (fr_val + 500UL) / 1000UL;
   
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
@@ -547,8 +540,6 @@ void init_slave_table(void)
     slaves[i].online = 0;
     slaves[i].discovered = 0;
     slaves[i].consecutive_failures = 0;
-    slaves[i].total_flow_raw = 0;
-    slaves[i].flow_rate_raw = 0;
     slaves[i].total_flow = 0;
     slaves[i].flow_rate = 0;
     slaves[i].last_poll_ms = 0;
