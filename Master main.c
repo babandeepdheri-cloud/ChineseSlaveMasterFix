@@ -73,6 +73,18 @@ data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Ini
 /* =========================
    Multi-Slave Management
    ========================= */
+// Special character codes for display
+#define DASH_CHAR 10
+#define CHAR_S 11  // Letter S
+#define CHAR_c 12  // Letter c (lowercase)
+#define CHAR_A 13  // Letter A
+#define CHAR_n 14  // Letter n
+#define CHAR_d 15  // Letter d
+#define CHAR_E 16  // Letter E
+#define CHAR_v 17  // Letter v
+#define CHAR_i 18  // Letter i
+#define CHAR_SPACE 19  // Space (blank)
+
 typedef struct {
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
@@ -90,6 +102,7 @@ data unsigned char discovery_id = MIN_SLAVE_ID;  // Next ID to try discovering
 xdata unsigned long last_discovery_ms = 0;
 xdata unsigned long last_display_toggle_ms = 0;
 bit discovery_mode = 0;                 // In discovery scan mode
+bit scanning_mode = 1;                  // In initial scanning phase (show "Scan", "devices", "id")
 data unsigned char current_request_slave_id = 0;  // ID of slave for current request
 
 /* =========================
@@ -118,7 +131,6 @@ bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
 #define MAX_CONSECUTIVE_FAILURES 5  // Changed back to 5 per requirements
-#define DASH_CHAR 10
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -154,8 +166,32 @@ void Timer0_ISR(void) interrupt 1
   fnd1=fnd2=fnd3=fnd4=fnd5=fnd6=fnd7=fnd8=fnd9=fnd10=fnd11=fnd12=fnd13=0;
   A_Segment=B_Segment=C_Segment=D_Segment=E_Segment=F_Segment=G_Segment=H_Segment=1;
 
-  // 2. Check if slave is disconnected - display dashes
-  if (slave_disconnected) {
+  // 2. Check if in scanning mode - display "Scan", "devices", "id"
+  if (scanning_mode) {
+    switch (scan_d)
+    {
+      // --- LET (Total Flow) - show "Scan " ---
+      case 0: display_digit(CHAR_S); fnd13=1; break;      // S
+      case 1: display_digit(CHAR_c); fnd12=1; break;      // c
+      case 2: display_digit(CHAR_A); fnd11=1; break;      // A
+      case 3: display_digit(CHAR_n); fnd10=1; break;      // n
+      case 4: display_digit(CHAR_SPACE); fnd4=1; break;   // space
+
+      // --- KET (Flow Rate) - show "dEvic" ---
+      case 5: display_digit(CHAR_d); fnd9=1; break;       // d
+      case 6: display_digit(CHAR_E); fnd8=1; break;       // E
+      case 7: display_digit(CHAR_v); fnd7=1; break;       // v
+      case 8: display_digit(CHAR_i); fnd6=1; break;       // i
+      case 9: display_digit(CHAR_c); fnd5=1; break;       // c
+
+      // --- PET (ID) - show " id" ---
+      case 10: display_digit(CHAR_SPACE); fnd3=1; break;  // space
+      case 11: display_digit(CHAR_i); fnd2=1; break;      // i
+      case 12: display_digit(CHAR_d); fnd1=1; break;      // d
+    }
+  }
+  // 3. Check if slave is disconnected - display dashes
+  else if (slave_disconnected) {
     switch (scan_d)
     {
       // --- LET (Total Flow) - show dashes ---
@@ -423,6 +459,9 @@ static bit modbus_parse_response(void)
     slaves[slave_idx].discovered = 1;
     active_slave_count++;
     
+    // Exit scanning mode when first slave is discovered
+    scanning_mode = 0;
+    
     // If this is the first slave discovered, set it as the displayed slave
     if (current_display_id == 0) {
       current_display_id = slave_id;
@@ -496,6 +535,7 @@ void init_slave_table(void)
   current_poll_index = 0;
   current_display_id = 0;
   discovery_id = MIN_SLAVE_ID;
+  scanning_mode = 1;  // Start in scanning mode
 }
 
 unsigned char get_next_online_slave(unsigned char start_id)
@@ -598,12 +638,21 @@ void handle_display_toggle(void)
 
 void handle_discovery(void)
 {
+  unsigned long discovery_interval;
+  
   // Periodic discovery scan when not all slaves discovered
   if (active_slave_count >= MAX_SLAVES) {
     return;  // All slots filled
   }
   
-  if ((ms_ticks - last_discovery_ms) < DISCOVERY_INTERVAL_MS) {
+  // During scanning mode (startup), use faster discovery interval
+  if (scanning_mode) {
+    discovery_interval = 1000UL;  // 1 second during scanning mode for faster initial discovery
+  } else {
+    discovery_interval = DISCOVERY_INTERVAL_MS;  // 5 seconds after first slave found
+  }
+  
+  if ((ms_ticks - last_discovery_ms) < discovery_interval) {
     return;  // Not time yet
   }
   
@@ -638,6 +687,11 @@ void handle_polling(void)
   
   if (waiting_for_response) {
     return;  // Already waiting
+  }
+  
+  // During scanning mode, prioritize discovery over polling
+  if (scanning_mode) {
+    return;  // Let discovery happen first
   }
   
   if (active_slave_count == 0) {
@@ -849,6 +903,25 @@ void display_digit(unsigned char c)
     case 9: A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=0; E_Segment=1; F_Segment=0; G_Segment=0; break;
     case DASH_CHAR: // Dash character '-' (only G segment on)
       A_Segment=1; B_Segment=1; C_Segment=1; D_Segment=1; E_Segment=1; F_Segment=1; G_Segment=0; break;
+    // Letter characters for scanning display
+    case CHAR_S: // Letter S (segments A,C,D,F,G)
+      A_Segment=0; B_Segment=1; C_Segment=0; D_Segment=0; E_Segment=1; F_Segment=0; G_Segment=0; break;
+    case CHAR_c: // Letter c (segments D,E,G)
+      A_Segment=1; B_Segment=1; C_Segment=1; D_Segment=0; E_Segment=0; F_Segment=1; G_Segment=0; break;
+    case CHAR_A: // Letter A (segments A,B,C,E,F,G)
+      A_Segment=0; B_Segment=0; C_Segment=0; D_Segment=1; E_Segment=0; F_Segment=0; G_Segment=0; break;
+    case CHAR_n: // Letter n (segments C,E,G)
+      A_Segment=1; B_Segment=1; C_Segment=0; D_Segment=1; E_Segment=0; F_Segment=1; G_Segment=0; break;
+    case CHAR_d: // Letter d (segments B,C,D,E,G)
+      A_Segment=1; B_Segment=0; C_Segment=0; D_Segment=0; E_Segment=0; F_Segment=1; G_Segment=0; break;
+    case CHAR_E: // Letter E (segments A,D,E,F,G)
+      A_Segment=0; B_Segment=1; C_Segment=1; D_Segment=0; E_Segment=0; F_Segment=0; G_Segment=0; break;
+    case CHAR_v: // Letter v (segments C,D,E)
+      A_Segment=1; B_Segment=1; C_Segment=0; D_Segment=0; E_Segment=0; F_Segment=1; G_Segment=1; break;
+    case CHAR_i: // Letter i (segments E)
+      A_Segment=1; B_Segment=1; C_Segment=1; D_Segment=1; E_Segment=0; F_Segment=1; G_Segment=1; break;
+    case CHAR_SPACE: // Space (all segments off)
+      A_Segment=1; B_Segment=1; C_Segment=1; D_Segment=1; E_Segment=1; F_Segment=1; G_Segment=1; break;
     default: A_Segment=B_Segment=C_Segment=D_Segment=E_Segment=F_Segment=G_Segment=H_Segment=1; break;
   }
 }
