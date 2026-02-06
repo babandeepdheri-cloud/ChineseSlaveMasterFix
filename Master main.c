@@ -104,6 +104,7 @@ xdata unsigned long last_display_toggle_ms = 0;
 bit discovery_mode = 0;                 // In discovery scan mode
 volatile bit scanning_mode = 1;         // In initial scanning phase (show "Scan", "devices", "id")
 data unsigned char scanning_cycles = 0;  // Count discovery cycles during scanning mode
+bit scanning_mode_exited = 0;           // Flag to track if we've ever exited scanning mode (prevents re-entry)
 data unsigned char current_request_slave_id = 0;  // ID of slave for current request
 
 /* =========================
@@ -131,7 +132,7 @@ volatile bit slave_disconnected = 0;  // At least one slave showing disconnect o
 volatile bit data_received_flag = 0;
 xdata volatile unsigned long dp_flash_start_ms = 0;
 #define DP_FLASH_DURATION_MS 500
-#define MAX_CONSECUTIVE_FAILURES 3  // Show "----" after 3-4 consecutive failures as per user requirement
+#define MAX_CONSECUTIVE_FAILURES 5  // Show "----" after 5 consecutive failures (~5 seconds with 1s polling)
 #define MIN_REQUEST_INTERVAL_MS 600  // Chinese slave requires >500ms between requests
 
 static unsigned char scan_d = 0;
@@ -168,7 +169,8 @@ void Timer0_ISR(void) interrupt 1
   A_Segment=B_Segment=C_Segment=D_Segment=E_Segment=F_Segment=G_Segment=H_Segment=1;
 
   // 2. Check if in scanning mode - display "Scan", "devices", "id"
-  if (scanning_mode) {
+  // Only show scanning display during initial startup (before scanning_mode_exited is set)
+  if (scanning_mode && !scanning_mode_exited) {
     switch (scan_d)
     {
       // --- LET (Total Flow) - show "Scan " ---
@@ -542,6 +544,7 @@ void init_slave_table(void)
   discovery_id = MIN_SLAVE_ID;
   scanning_mode = 1;  // Start in scanning mode
   scanning_cycles = 0;  // Reset cycle counter
+  scanning_mode_exited = 0;  // Reset exit flag for fresh start
 }
 
 unsigned char get_next_online_slave(unsigned char start_id)
@@ -682,12 +685,13 @@ void handle_discovery(void)
     discovery_id = MIN_SLAVE_ID;
     
     // Increment cycle counter when wrapping around during scanning mode
-    if (scanning_mode) {
+    if (scanning_mode && !scanning_mode_exited) {
       scanning_cycles++;
       // Exit scanning mode after 2 complete cycles (10 seconds total with 1s interval)
       // This ensures multiple slaves have time to be discovered
       if (scanning_cycles >= 2) {
         scanning_mode = 0;
+        scanning_mode_exited = 1;  // Mark that we've exited - prevents re-entry
       }
     }
   }
