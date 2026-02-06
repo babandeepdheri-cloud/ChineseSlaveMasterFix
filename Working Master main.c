@@ -457,7 +457,7 @@ static bit modbus_parse_response(void)
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
   // Store full values for backend/cloud transmission
-  // Display will show integer part only (handled in update_display_digits)
+  // Display will show rightmost 5 digits (handled in update_display_digits)
   slaves[slave_idx].total_flow = total_val;
   slaves[slave_idx].flow_rate = fr_val;
   slaves[slave_idx].consecutive_failures = 0;
@@ -504,7 +504,7 @@ void update_display_digits(void)
   unsigned int temp_id;
   
   // Calculate Total Flow digits
-  // Display integer part - for values > 99999, show rightmost 5 digits
+  // For values > 99999, show rightmost 5 digits on 5-digit display
   temp = disp_total_u % 100000UL;
   disp_total_digits[4] = temp % 10; temp /= 10;  // ones
   disp_total_digits[3] = temp % 10; temp /= 10;  // tens
@@ -513,7 +513,7 @@ void update_display_digits(void)
   disp_total_digits[0] = temp % 10;              // ten-thousands
   
   // Calculate Flow Rate digits
-  // Display integer part - for values > 99999, show rightmost 5 digits
+  // For values > 99999, show rightmost 5 digits on 5-digit display
   temp = disp_fr_u % 100000UL;
   disp_fr_digits[4] = temp % 10; temp /= 10;  // ones
   disp_fr_digits[3] = temp % 10; temp /= 10;  // tens
