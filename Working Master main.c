@@ -88,16 +88,16 @@ data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Ini
 /* =========================
    Data Flow Architecture
    =========================
-   Chinese Slave → Master Backend → Display (truncated) + Cloud (exact decimals)
+   Chinese Slave → Master Backend → Display (truncated) + Cloud (exact values)
    
-   Example with value 17991.628:
-   1. Chinese slave sends: 17991628 (scaled by 1000)
-   2. Backend storage:     17991.628 (float with decimals) ← PRESERVED FOR CLOUD
+   Example with value 17991:
+   1. Chinese slave sends: 17991 (actual value, may have decimals)
+   2. Backend storage:     17991.0 (float for precision) ← PRESERVED FOR CLOUD
    3. Display shows:       17991 (truncated integer for demo)
-   4. Cloud transmission:  17991.628 (exact decimals from backend)
+   4. Cloud transmission:  17991.0 (exact value from backend)
    
    IMPORTANT: Display truncation is ONLY for demo purposes. Backend float values
-   preserve exact decimals for cloud transmission. Use slaves[idx].total_flow
+   preserve exact values for cloud transmission. Use slaves[idx].total_flow
    and slaves[idx].flow_rate directly when sending to cloud.
    ========================= */
 
@@ -474,11 +474,11 @@ static bit modbus_parse_response(void)
   // Update slave info in the table
   slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
   
-  // Store values as float to preserve decimal precision
-  // Chinese slave sends values scaled by 1000 (e.g., 17991.628 → 17991628)
-  // Divide by 1000.0f to get actual value with decimals (17991628 → 17991.628)
-  slaves[slave_idx].total_flow = (float)total_val / 1000.0f;
-  slaves[slave_idx].flow_rate = (float)fr_val / 1000.0f;
+  // Store values as float to preserve any decimal precision from slave
+  // Chinese slave sends actual values (e.g., 17991 or 17991.xx)
+  // Store directly without scaling
+  slaves[slave_idx].total_flow = (float)total_val;
+  slaves[slave_idx].flow_rate = (float)fr_val;
   
   slaves[slave_idx].consecutive_failures = 0;
   slaves[slave_idx].last_poll_ms = ms_ticks;
