@@ -823,10 +823,8 @@ void handle_polling(void)
     return;  // Already waiting
   }
   
-  // During scanning mode, prioritize discovery over polling
-  if (scanning_mode) {
-    return;  // Let discovery happen first
-  }
+  // Poll known slaves immediately, even during scanning mode
+  // This allows previously discovered slaves (loaded from SPROM) to be polled right away
   
   if (active_slave_count == 0) {
     return;  // No slaves to poll
@@ -973,11 +971,11 @@ void main(void)
     // Handle display toggling between online slaves
     handle_display_toggle();
     
+    // Handle polling of known slaves (priority over discovery)
+    handle_polling();
+    
     // Handle discovery of new slaves
     handle_discovery();
-    
-    // Handle polling of known slaves
-    handle_polling();
 
     if (sw_reset == 0) {
       ms_delay(200);
