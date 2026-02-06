@@ -87,6 +87,7 @@ data unsigned char disp_id_digits[3] = {0,0,0};         // [100s, 10s, 1s] - Ini
 #define CHAR_SPACE 19  // Space (blank)
 
 typedef struct {
+  unsigned char slave_id;               // Actual slave ID (1-255, 0=empty slot)
   unsigned char online;                 // Slave is online (0=offline, 1=online)
   unsigned char discovered;             // Slave has been discovered at least once (0=no, 1=yes)
   unsigned char consecutive_failures;   // Consecutive poll failures for this slave
@@ -95,11 +96,11 @@ typedef struct {
   unsigned long last_poll_ms;           // Last time this slave was polled
 } SlaveInfo;
 
-xdata SlaveInfo slaves[MAX_SLAVES];     // Slave info table (index 0-4 for IDs 1-5)
+xdata SlaveInfo slaves[MAX_SLAVES];     // Slave info table (up to 5 slaves with any IDs)
 data unsigned char active_slave_count = 0;  // Number of discovered online slaves
-data unsigned char current_poll_index = 0;  // Current slave being polled
-data unsigned char current_display_id = 0;  // Currently displayed slave (0 = none)
-data unsigned char discovery_id = MIN_SLAVE_ID;  // Next ID to try discovering
+data unsigned char current_poll_index = 0;  // Current slave slot being polled (0-4)
+data unsigned char current_display_id = 0;  // Currently displayed slave ID (0 = none)
+data unsigned char discovery_id = 1;  // Next ID to try discovering (1-255, skip 0)
 xdata unsigned long last_discovery_ms = 0;
 xdata unsigned long last_display_toggle_ms = 0;
 bit discovery_mode = 0;                 // In discovery scan mode
@@ -156,6 +157,8 @@ unsigned char get_next_online_slave(unsigned char start_id);
 void handle_display_toggle(void);
 void handle_discovery(void);
 void handle_polling(void);
+char find_slave_slot_by_id(unsigned char slave_id);  // Returns slot index (0-4) or -1
+char find_empty_slave_slot(void);  // Returns empty slot index (0-4) or -1
 
 /* =========================
    TIMER0 ISR: multiplex display
@@ -424,15 +427,15 @@ static bit modbus_parse_response(void)
   unsigned int high_word, low_word;
   unsigned long total_val, fr_val;
   unsigned char slave_id;
-  unsigned char slave_idx;
+  char slot;
   
   // Expected response: 1(ID) + 1(FC) + 1(count) + 28(data) + 2(CRC) = 33 bytes
   if (modbus_rx_len != 33) return 0;
   
   slave_id = modbus_rx_buf[0];
   
-  // Check if this is a valid slave ID (1-5)
-  if (slave_id < MIN_SLAVE_ID || slave_id > MAX_SLAVE_ID) return 0;
+  // Check if this is a valid slave ID (1-247, skip 0)
+  if (slave_id == 0 || slave_id > 247) return 0;
   
   // Check if response is for the slave we requested
   if (slave_id != current_request_slave_id) return 0;
@@ -454,34 +457,46 @@ static bit modbus_parse_response(void)
   low_word = ((unsigned int)modbus_rx_buf[15] << 8) | modbus_rx_buf[16];
   total_val = ((unsigned long)high_word << 16) | low_word;
   
-  // Update slave info in the table
-  slave_idx = slave_id - 1;  // Convert ID (1-5) to index (0-4)
+  // Find or create slot for this slave
+  slot = find_slave_slot_by_id(slave_id);
   
-  // Convert to float (values are sent with 3 decimal places, divide by 1000)
-  slaves[slave_idx].total_flow = (float)total_val / 1000.0;
-  slaves[slave_idx].flow_rate = (float)fr_val / 1000.0;
-  slaves[slave_idx].consecutive_failures = 0;
-  slaves[slave_idx].last_poll_ms = ms_ticks;
-  
-  // Mark as discovered and online if this is first time
-  if (!slaves[slave_idx].discovered) {
-    slaves[slave_idx].discovered = 1;
-    active_slave_count++;
+  if (slot < 0) {
+    // Slave not in table yet - try to add it
+    if (active_slave_count >= MAX_SLAVES) {
+      return 0;  // Table full, can't add
+    }
     
-    // Don't exit scanning mode immediately - let it complete 2 cycles
-    // This ensures multiple slaves at startup are all discovered
+    slot = find_empty_slave_slot();
+    if (slot < 0) {
+      return 0;  // No empty slots (shouldn't happen if count is correct)
+    }
+    
+    // Initialize new slave in this slot
+    slaves[slot].slave_id = slave_id;
+    slaves[slot].discovered = 1;
+    slaves[slot].online = 1;
+    slaves[slot].consecutive_failures = 0;
+    active_slave_count++;
     
     // If this is the first slave discovered, set it as the displayed slave
     if (current_display_id == 0) {
       current_display_id = slave_id;
     }
+  } else {
+    // Slave already in table - update status
+    slaves[slot].online = 1;
+    slaves[slot].consecutive_failures = 0;
   }
-  slaves[slave_idx].online = 1;
+  
+  // Convert to float (values are sent with 3 decimal places, divide by 1000)
+  slaves[slot].total_flow = (float)total_val / 1000.0;
+  slaves[slot].flow_rate = (float)fr_val / 1000.0;
+  slaves[slot].last_poll_ms = ms_ticks;
   
   // If this is the currently displayed slave, update display immediately
   if (current_display_id == slave_id) {
-    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;  // Cast float to unsigned long for display
-    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;      // Cast float to unsigned long for display
+    disp_total_u = (unsigned long)slaves[slot].total_flow;  // Cast float to unsigned long for display (NO MODULO!)
+    disp_fr_u = (unsigned long)slaves[slot].flow_rate;      // Cast float to unsigned long for display (NO MODULO!)
     disp_id_u = slave_id;
     update_display_digits();
     slave_disconnected = 0;
@@ -533,6 +548,7 @@ void init_slave_table(void)
 {
   unsigned char i;
   for (i = 0; i < MAX_SLAVES; i++) {
+    slaves[i].slave_id = 0;  // 0 = empty slot
     slaves[i].online = 0;
     slaves[i].discovered = 0;
     slaves[i].consecutive_failures = 0;
@@ -543,28 +559,61 @@ void init_slave_table(void)
   active_slave_count = 0;
   current_poll_index = 0;
   current_display_id = 0;
-  discovery_id = MIN_SLAVE_ID;
+  discovery_id = 1;  // Start from ID 1 (skip 0)
   scanning_mode = 1;  // Start in scanning mode
   scanning_cycles = 0;  // Reset cycle counter
   scanning_mode_exited = 0;  // Reset exit flag for fresh start
 }
 
+// Find slave slot by ID, returns slot index (0-4) or -1 if not found
+char find_slave_slot_by_id(unsigned char slave_id)
+{
+  unsigned char i;
+  for (i = 0; i < MAX_SLAVES; i++) {
+    if (slaves[i].slave_id == slave_id) {
+      return (char)i;
+    }
+  }
+  return -1;  // Not found
+}
+
+// Find empty slave slot, returns slot index (0-4) or -1 if all full
+char find_empty_slave_slot(void)
+{
+  unsigned char i;
+  for (i = 0; i < MAX_SLAVES; i++) {
+    if (slaves[i].slave_id == 0) {  // Empty slot
+      return (char)i;
+    }
+  }
+  return -1;  // All slots full
+}
+
 unsigned char get_next_online_slave(unsigned char start_id)
 {
-  unsigned char id, checks;
+  unsigned char i, start_slot, checks;
+  char slot;
   
   if (active_slave_count == 0) return 0;
   
-  id = start_id;
-  if (id < MIN_SLAVE_ID || id > MAX_SLAVE_ID) id = MIN_SLAVE_ID;
-  
-  // Check up to MAX_SLAVES times to find next discovered slave (online or offline)
-  for (checks = 0; checks < MAX_SLAVES; checks++) {
-    if (slaves[id - 1].discovered) {  // Changed from .online to .discovered
-      return id;  // Return any discovered slave, even if temporarily offline
+  // Find starting slot
+  if (start_id == 0) {
+    start_slot = 0;
+  } else {
+    slot = find_slave_slot_by_id(start_id);
+    if (slot >= 0) {
+      start_slot = (unsigned char)(slot + 1) % MAX_SLAVES;  // Start from next slot
+    } else {
+      start_slot = 0;
     }
-    id++;
-    if (id > MAX_SLAVE_ID) id = MIN_SLAVE_ID;
+  }
+  
+  // Search for next discovered slave
+  for (checks = 0; checks < MAX_SLAVES; checks++) {
+    i = (start_slot + checks) % MAX_SLAVES;
+    if (slaves[i].discovered && slaves[i].slave_id != 0) {
+      return slaves[i].slave_id;  // Return the actual slave ID
+    }
   }
   
   return 0;  // No discovered slaves found
@@ -572,16 +621,20 @@ unsigned char get_next_online_slave(unsigned char start_id)
 
 void update_display_for_current_slave(void)
 {
-  unsigned char slave_idx;
+  char slot;
   
-  if (current_display_id == 0 || current_display_id < MIN_SLAVE_ID || current_display_id > MAX_SLAVE_ID) {
+  if (current_display_id == 0) {
     // No valid slave to display
     return;
   }
   
-  slave_idx = current_display_id - 1;
+  slot = find_slave_slot_by_id(current_display_id);
+  if (slot < 0) {
+    // Slave not found
+    return;
+  }
   
-  if (!slaves[slave_idx].online) {
+  if (!slaves[slot].online) {
     // Slave is offline - show dashes
     slave_disconnected = 1;
     disp_id_u = current_display_id;
@@ -589,8 +642,8 @@ void update_display_for_current_slave(void)
   } else {
     // Slave is online - show its data
     slave_disconnected = 0;
-    disp_total_u = (unsigned long)slaves[slave_idx].total_flow;  // Cast float to unsigned long for display
-    disp_fr_u = (unsigned long)slaves[slave_idx].flow_rate;      // Cast float to unsigned long for display
+    disp_total_u = (unsigned long)slaves[slot].total_flow;  // Cast float to unsigned long for display (no modulo!)
+    disp_fr_u = (unsigned long)slaves[slot].flow_rate;      // Cast float to unsigned long for display (no modulo!)
     disp_id_u = current_display_id;
     update_display_digits();
   }
@@ -610,8 +663,8 @@ void handle_display_toggle(void)
   // If only one slave, keep showing it (don't toggle)
   if (active_slave_count == 1) {
     if (current_display_id == 0) {
-      // First time - find the online slave
-      next_id = get_next_online_slave(MIN_SLAVE_ID);
+      // First time - find the discovered slave
+      next_id = get_next_online_slave(0);
       if (next_id != 0) {
         current_display_id = next_id;
         update_display_for_current_slave();
@@ -631,13 +684,13 @@ void handle_display_toggle(void)
   // Find next online slave to display
   if (current_display_id == 0) {
     // First time - find first online slave
-    next_id = get_next_online_slave(MIN_SLAVE_ID);
+    next_id = get_next_online_slave(0);
   } else {
     // Find next online slave after current one
-    next_id = get_next_online_slave(current_display_id + 1);
-    if (next_id == 0) {
+    next_id = get_next_online_slave(current_display_id);
+    if (next_id == 0 || next_id == current_display_id) {
       // Wrap around to first
-      next_id = get_next_online_slave(MIN_SLAVE_ID);
+      next_id = get_next_online_slave(0);
     }
   }
   
@@ -654,7 +707,7 @@ void handle_discovery(void)
   unsigned long discovery_time_slot;
   
   // Always continue discovery to find new slaves or rediscover offline ones
-  // Don't stop discovery even when MAX_SLAVES reached
+  // Discovery now scans IDs 1-247 (skip 0, 248-255 reserved)
   
   // During scanning mode (startup), use faster discovery interval
   if (scanning_mode) {
@@ -676,10 +729,15 @@ void handle_discovery(void)
     return;  // Too soon
   }
   
+  // Skip ID 0 (unconfigured device)
+  if (discovery_id == 0) {
+    discovery_id = 1;
+  }
+  
   // Use time slots to avoid collision with polling
   // Discovery happens in second half of each slave's time slot (100-199ms within slot)
   current_cycle_position = ms_ticks % POLL_CYCLE_MS;
-  discovery_time_slot = (discovery_id - 1) * TIME_SLOT_MS + 100;  // Offset by 100ms into slot
+  discovery_time_slot = ((discovery_id - 1) % 5) * TIME_SLOT_MS + 100;  // Use modulo for IDs > 5
   
   // Only send discovery if we're in the right time slot (with 50ms window)
   if (current_cycle_position >= discovery_time_slot && 
@@ -694,15 +752,16 @@ void handle_discovery(void)
     
     // Move to next ID for next discovery cycle
     discovery_id++;
-    if (discovery_id > MAX_SLAVE_ID) {
-      discovery_id = MIN_SLAVE_ID;
+    if (discovery_id > 247) {  // Scan IDs 1-247 (avoid 248-255 which may be reserved)
+      discovery_id = 1;  // Wrap to 1 (skip 0)
       
       // Increment cycle counter when wrapping around during scanning mode
       if (scanning_mode && !scanning_mode_exited) {
         scanning_cycles++;
-        // Exit scanning mode after 2 complete cycles (10 seconds total with 1s interval)
-        // This ensures multiple slaves have time to be discovered
-        if (scanning_cycles >= 2) {
+        // Exit scanning mode after 2 complete cycles
+        // With 247 IDs and delays, this takes significant time
+        // So we'll exit after finding ANY slave or 10 seconds
+        if (scanning_cycles >= 1 || active_slave_count > 0) {  // Exit after 1 cycle or when slave found
           scanning_mode = 0;
           scanning_mode_exited = 1;  // Mark that we've exited - prevents re-entry
         }
@@ -713,8 +772,8 @@ void handle_discovery(void)
 
 void handle_polling(void)
 {
+  unsigned char i;
   unsigned char slave_id;
-  unsigned char slave_idx;
   unsigned long current_cycle_position;
   unsigned long slave_time_slot;
   
@@ -738,17 +797,17 @@ void handle_polling(void)
   // Calculate position within current 1-second cycle (0-999ms)
   current_cycle_position = ms_ticks % POLL_CYCLE_MS;
   
-  // Check each discovered slave to see if it's their time slot
-  for (slave_id = MIN_SLAVE_ID; slave_id <= MAX_SLAVE_ID; slave_id++) {
-    slave_idx = slave_id - 1;
-    
-    if (!slaves[slave_idx].discovered) {
-      continue;  // Skip undiscovered slaves
+  // Check each slot to see if there's a discovered slave that needs polling
+  for (i = 0; i < MAX_SLAVES; i++) {
+    if (!slaves[i].discovered || slaves[i].slave_id == 0) {
+      continue;  // Skip empty or undiscovered slots
     }
     
+    slave_id = slaves[i].slave_id;
+    
     // Calculate this slave's time slot within the cycle
-    // Slave 1: 0-199ms, Slave 2: 200-399ms, Slave 3: 400-599ms, etc.
-    slave_time_slot = (slave_id - 1) * TIME_SLOT_MS;
+    // Use modulo to map any ID to one of 5 time slots
+    slave_time_slot = ((slave_id - 1) % 5) * TIME_SLOT_MS;
     
     // Check if we're in this slave's time slot (with 50ms window)
     if (current_cycle_position >= slave_time_slot && 
@@ -756,8 +815,8 @@ void handle_polling(void)
       
       // Check if this slave hasn't been polled recently (at least 900ms ago)
       // This prevents double-polling in the same cycle
-      if ((ms_ticks - slaves[slave_idx].last_poll_ms) >= (POLL_CYCLE_MS - 100)) {
-        current_poll_index = slave_id;
+      if ((ms_ticks - slaves[i].last_poll_ms) >= (POLL_CYCLE_MS - 100)) {
+        current_poll_index = i;  // Store slot index
         current_request_slave_id = slave_id;
         discovery_mode = 0;
         modbus_retry_count = 0;
@@ -854,21 +913,23 @@ void main(void)
           modbus_retry_count = 0;
           
           // Increment consecutive poll failures for this specific slave
-          if (current_request_slave_id >= MIN_SLAVE_ID && current_request_slave_id <= MAX_SLAVE_ID) {
-            unsigned char slave_idx = current_request_slave_id - 1;
-            slaves[slave_idx].consecutive_failures++;
-            
-            // Check if slave is disconnected (5 consecutive poll failures)
-            if (slaves[slave_idx].consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
-              slaves[slave_idx].online = 0;
-              // DON'T remove discovered flag - keep slave in rotation showing "----"
-              // This allows the slave to stay in display toggle and be rediscovered
+          if (current_request_slave_id != 0) {
+            char slot = find_slave_slot_by_id(current_request_slave_id);
+            if (slot >= 0) {
+              slaves[slot].consecutive_failures++;
               
-              // If this was the displayed slave, show disconnected but keep displaying it
-              if (current_display_id == current_request_slave_id) {
-                slave_disconnected = 1;
-                update_display_digits();
-                // DON'T switch to another slave - keep showing this one with "----"
+              // Check if slave is disconnected (5 consecutive poll failures)
+              if (slaves[slot].consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                slaves[slot].online = 0;
+                // DON'T remove discovered flag - keep slave in rotation showing "----"
+                // This allows the slave to stay in display toggle and be rediscovered
+                
+                // If this was the displayed slave, show disconnected but keep displaying it
+                if (current_display_id == current_request_slave_id) {
+                  slave_disconnected = 1;
+                  update_display_digits();
+                  // DON'T switch to another slave - keep showing this one with "----"
+                }
               }
             }
           }
